@@ -1,19 +1,30 @@
-# Fútbol Cerca – Android
+# Fútbol Cerca 2.0
 
-## Firebase conectado
-- Proyecto Firebase: `futbolcerca-e94f0`
-- Paquete Android: `com.futbolcerca.app`
-- Firebase Authentication (correo/contraseña) y Cloud Firestore.
-- `google-services.json` está en `app/`.
+Proyecto Android Kotlin + Jetpack Compose + Firebase Authentication + Cloud Firestore.
 
-## Antes de probar
-1. En Firebase Console > Authentication > Sign-in method, habilitá **Correo electrónico/Contraseña**.
-2. En Firestore Database, creá la base de datos.
-3. Publicá las reglas de `firestore.rules` desde la sección Rules de Firestore.
-4. Compilá con GitHub Actions.
+## Configuración necesaria
+1. Conservar `app/google-services.json` del proyecto Firebase existente.
+2. En Firebase Authentication, habilitar correo/contraseña.
+3. Crear Cloud Firestore.
+4. Publicar el contenido de `firestore.rules` en Firestore > Rules.
+5. Subir el contenido del ZIP a la rama `version-2-funcional` (reemplazando los archivos del proyecto).
+6. Ejecutar GitHub Actions > Compilar Fútbol Cerca APK.
 
-## Registro y roles
-El usuario elige Jugador, Capitán o Dueño/administrador de cancha al crear la cuenta. El rol queda guardado en `users/{uid}` y no se ofrece un selector para cambiar de rol en la pantalla principal. Las cuentas de capitán y cancha quedan con `verificationStatus: pending`; esta versión no implementa todavía el proceso de verificación documental.
+## Funciones incluidas en esta base
+- Registro e inicio de sesión con Firebase.
+- Roles Jugador, Capitán y Cancha.
+- Perfil deportivo guardado en Firestore.
+- Publicación y listado en tiempo real de partidos.
+- Postulaciones persistentes por jugador y partido.
+- Revisión y aceptación/rechazo de postulaciones por el organizador.
+- Búsqueda de perfiles de jugadores para capitanes.
+- Acceso a OpenStreetMap mediante búsqueda de zona aproximada.
+- Contacto de licencias con CodeMarket por WhatsApp: +54 9 261 511-7220.
+- Número de versión Android 2.0.0.
 
-## Limitaciones de esta entrega
-Los partidos y postulaciones del panel siguen siendo datos de demostración. La autenticación y el guardado del tipo de cuenta sí usan Firebase. No publicar la app en producción hasta completar reglas específicas para partidos, solicitudes, perfiles públicos, almacenamiento y moderación.
+## Límites y seguridad
+Esta entrega no incorpora GPS en segundo plano, fotos/videos, notificaciones push, pagos automáticos ni servidor propio. OpenStreetMap se abre en el navegador; no es un mapa embebido ni calcula distancias. Las cuentas de capitán/cancha quedan pendientes de verificación, pero esta versión no implementa revisión documental.
+
+La prueba de 7 días se muestra como condición comercial, pero todavía no existe un sistema antifraude completo ni un panel de emisión/validación de licencias. No se debe presentar esa protección como implementada. Los límites gratuitos de Firebase aplican; monitorear el consumo.
+
+Las reglas permiten leer perfiles autenticados para búsqueda de jugadores; no publicar datos sensibles ni direcciones exactas. Esta base requiere pruebas funcionales reales en Firebase antes de distribuirse.

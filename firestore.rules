@@ -1,13 +1,41 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /users/{userId} {
-      allow create: if request.auth != null && request.auth.uid == userId
-        && request.resource.data.role in ["Jugador", "Capitán", "Cancha"];
-      allow read: if request.auth != null;
-      allow update: if request.auth != null && request.auth.uid == userId
-        && request.resource.data.role == resource.data.role;
+    function signedIn() { return request.auth != null; }
+    function own(uid) { return signedIn() && request.auth.uid == uid; }
+
+    match /users/{uid} {
+      allow create: if own(uid)
+        && request.resource.data.role in ['Jugador', 'Capitán', 'Cancha'];
+      allow read: if signedIn();
+      allow update: if own(uid)
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.trialStartedAt == resource.data.trialStartedAt;
       allow delete: if false;
+    }
+
+    match /matches/{matchId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.status == 'open';
+      allow update: if signedIn()
+        && resource.data.ownerUid == request.auth.uid
+        && request.resource.data.ownerUid == resource.data.ownerUid;
+      allow delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
+
+      match /applications/{applicantUid} {
+        allow read: if signedIn() &&
+          (request.auth.uid == applicantUid ||
+           get(/databases/$(database)/documents/matches/$(matchId)).data.ownerUid == request.auth.uid);
+        allow create: if own(applicantUid)
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.status == 'pending';
+        allow update: if signedIn()
+          && get(/databases/$(database)/documents/matches/$(matchId)).data.ownerUid == request.auth.uid
+          && request.resource.data.uid == resource.data.uid;
+        allow delete: if own(applicantUid);
+      }
     }
   }
 }
