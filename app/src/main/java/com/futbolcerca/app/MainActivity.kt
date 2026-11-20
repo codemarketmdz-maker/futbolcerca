@@ -44,7 +44,7 @@ data class Match(
 private val sampleMatches = listOf(
     Match("Partido de esta noche", "Mixto", "Fútbol 5", "Hoy · 23:30", "Cancha Centro", "1,2 km", 1, "$4.000"),
     Match("Buscamos dos jugadores", "Masculino", "Fútbol 7", "Mañana · 20:00", "Complejo Las Heras", "3,5 km", 2, "$3.500"),
-    Match("Fútbol femenino", "Femenino", "Fútbol 5", "Sábado · 18:00", "Cancha Parque", "2,1 km", "$3.000")
+    Match("Fútbol femenino", "Femenino", "Fútbol 5", "Sábado · 18:00", "Cancha Parque", "2,1 km", 2, "$3.000")
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
