@@ -2,9 +2,8 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
-    function matchPath(matchId) { return /databases/$(database)/documents/matches/$(matchId); }
     function isOwner(matchId) {
-      return signedIn() && get(matchPath(matchId)).data.ownerUid == request.auth.uid;
+      return signedIn() && get(/databases/$(database)/documents/matches/$(matchId)).data.ownerUid == request.auth.uid;
     }
 
     match /users/{uid} {
@@ -20,34 +19,40 @@ service cloud.firestore {
       allow read: if signedIn();
       allow create: if signedIn()
         && request.resource.data.ownerUid == request.auth.uid
-        && request.resource.data.status == 'open'
-        && request.resource.data.confirmedCount == 0
-        && request.resource.data.playersNeeded >= 1;
-      // El contador solo puede aumentar de a uno al confirmar un jugador.
+        && request.resource.data.status == 'open';
+
+      // El organizador puede editar su partido.
+      allow update: if signedIn() && resource.data.ownerUid == request.auth.uid
+        && request.resource.data.ownerUid == resource.data.ownerUid;
+
+      // Un jugador que acepta una invitación descuenta UNA vacante (y nada más),
+      // solo en el mismo lote en que se crea su registro en "participants".
       allow update: if signedIn()
-        && request.resource.data.ownerUid == resource.data.ownerUid
-        && request.resource.data.confirmedCount == (resource.data.keys().hasAny(['confirmedCount']) ? resource.data.confirmedCount : 0) + 1
-        && request.resource.data.confirmedCount <= resource.data.playersNeeded
-        && request.resource.data.playersNeeded == resource.data.playersNeeded
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['confirmedCount'])
-        && (resource.data.ownerUid == request.auth.uid
-          || (existsAfter(/databases/$(database)/documents/matches/$(matchId)/invitations/$(request.auth.uid)) && getAfter(/databases/$(database)/documents/matches/$(matchId)/invitations/$(request.auth.uid)).data.status == 'accepted'));
+        && resource.data.status == 'open'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['playersNeeded', 'status'])
+        && request.resource.data.playersNeeded == resource.data.playersNeeded - 1
+        && request.resource.data.playersNeeded >= 0
+        && ((request.resource.data.playersNeeded > 0 && request.resource.data.status == 'open')
+            || (request.resource.data.playersNeeded == 0 && request.resource.data.status == 'full'))
+        && !exists(/databases/$(database)/documents/matches/$(matchId)/participants/$(request.auth.uid))
+        && existsAfter(/databases/$(database)/documents/matches/$(matchId)/participants/$(request.auth.uid));
+
       allow delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
 
+      // Postulaciones: el jugador se postula, el organizador acepta o rechaza.
       match /applications/{playerUid} {
         allow read: if signedIn() && (request.auth.uid == playerUid || isOwner(matchId));
         allow create: if signedIn() && request.auth.uid == playerUid
           && request.resource.data.uid == request.auth.uid
           && request.resource.data.status == 'pending';
         allow update: if isOwner(matchId)
-          && resource.data.status == 'pending'
           && request.resource.data.uid == resource.data.uid
-          && request.resource.data.status in ['accepted', 'rejected']
-          && (request.resource.data.status != 'accepted'
-            || (existsAfter(/databases/$(database)/documents/matches/$(matchId)/players/$(playerUid)) && getAfter(/databases/$(database)/documents/matches/$(matchId)/players/$(playerUid)).data.uid == playerUid));
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'decidedAt'])
+          && request.resource.data.status in ['accepted', 'rejected'];
         allow delete: if signedIn() && request.auth.uid == playerUid;
       }
 
+      // Invitaciones: el organizador invita, el jugador acepta o rechaza.
       match /invitations/{playerUid} {
         allow read: if signedIn() && (request.auth.uid == playerUid || isOwner(matchId));
         allow create: if isOwner(matchId)
@@ -55,25 +60,29 @@ service cloud.firestore {
           && request.resource.data.ownerUid == request.auth.uid
           && request.resource.data.status == 'pending';
         allow update: if signedIn() && request.auth.uid == playerUid
-          && resource.data.status == 'pending'
           && request.resource.data.playerUid == resource.data.playerUid
-          && request.resource.data.status in ['accepted', 'rejected']
-          && (request.resource.data.status != 'accepted'
-            || (existsAfter(/databases/$(database)/documents/matches/$(matchId)/players/$(playerUid)) && getAfter(/databases/$(database)/documents/matches/$(matchId)/players/$(playerUid)).data.uid == playerUid));
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'respondedAt'])
+          && request.resource.data.status in ['accepted', 'rejected'];
         allow delete: if isOwner(matchId);
       }
 
-      match /players/{playerUid} {
+      // Jugadores confirmados en el partido (visibles para todos los usuarios con sesión).
+      match /participants/{playerUid} {
         allow read: if signedIn();
         allow create: if signedIn()
           && request.resource.data.uid == playerUid
-          && (isOwner(matchId) || request.auth.uid == playerUid)
-          && ((existsAfter(/databases/$(database)/documents/matches/$(matchId)/applications/$(playerUid))
+          && !exists(/databases/$(database)/documents/matches/$(matchId)/participants/$(playerUid))
+          && (
+            // Caso 1: el organizador acepta una postulación.
+            (isOwner(matchId)
               && getAfter(/databases/$(database)/documents/matches/$(matchId)/applications/$(playerUid)).data.status == 'accepted')
-            || (existsAfter(/databases/$(database)/documents/matches/$(matchId)/invitations/$(playerUid))
-              && getAfter(/databases/$(database)/documents/matches/$(matchId)/invitations/$(playerUid)).data.status == 'accepted'));
-        allow update: if false;
-        allow delete: if isOwner(matchId);
+            ||
+            // Caso 2: el jugador acepta una invitación que existe y está pendiente.
+            (request.auth.uid == playerUid
+              && get(/databases/$(database)/documents/matches/$(matchId)/invitations/$(playerUid)).data.status == 'pending'
+              && getAfter(/databases/$(database)/documents/matches/$(matchId)/invitations/$(playerUid)).data.status == 'accepted')
+          );
+        allow delete: if signedIn() && (request.auth.uid == playerUid || isOwner(matchId));
       }
     }
   }

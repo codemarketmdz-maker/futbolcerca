@@ -6,6 +6,9 @@ import android.app.TimePickerDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Paint
+import android.graphics.drawable.BitmapDrawable
 import android.location.Location
 import android.location.LocationManager
 import android.net.Uri
@@ -15,9 +18,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -30,6 +30,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -42,21 +43,37 @@ import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.ListenerRegistration
-import kotlinx.coroutines.tasks.await
+import com.google.firebase.firestore.SetOptions
+import com.google.firebase.firestore.Transaction
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
+import org.osmdroid.views.overlay.Polygon
+import java.net.HttpURLConnection
+import java.net.URL
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
-import kotlin.math.round
+import kotlin.math.asin
+import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.pow
+import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 private val db get() = FirebaseFirestore.getInstance()
 private val auth get() = FirebaseAuth.getInstance()
@@ -87,19 +104,9 @@ private fun Root() {
     LaunchedEffect(user?.uid) {
         val u = user ?: return@LaunchedEffect
         loading = true
-        profile = null
-        try {
-            var loaded: Map<String, Any>? = null
-            repeat(5) { attempt ->
-                val snapshot = db.collection("users").document(u.uid).get().await()
-                if (snapshot.exists()) loaded = snapshot.data
-                if (loaded == null && attempt < 4) delay(500L)
-            }
-            profile = loaded
-            if (loaded == null) message = "No encontramos tu perfil. Cerrá sesión y volvé a ingresar; si acabás de registrarte, verificá tu conexión."
-        } catch (e: Exception) {
-            message = e.localizedMessage ?: "No se pudo cargar el perfil"
-        } finally { loading = false }
+        db.collection("users").document(u.uid).get()
+            .addOnSuccessListener { profile = it.data; loading = false }
+            .addOnFailureListener { message = it.localizedMessage ?: "No se pudo cargar el perfil"; loading = false }
     }
     when {
         user == null -> AuthScreen({ loading = it }, { message = it })
@@ -116,7 +123,7 @@ private fun AuthScreen(setLoading: (Boolean) -> Unit, showMessage: (String) -> U
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var role by remember { mutableStateOf("Jugador") }
-    Column(Modifier.fillMaxSize().background(Canvas).verticalScroll(rememberScrollState()).imePadding().padding(24.dp), verticalArrangement = Arrangement.Center) {
+    Column(Modifier.fillMaxSize().background(Canvas).padding(24.dp), verticalArrangement = Arrangement.Center) {
         Surface(color = Green, shape = RoundedCornerShape(24.dp), modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(Icons.Default.SportsSoccer, null, tint = Lime, modifier = Modifier.size(48.dp))
@@ -152,8 +159,92 @@ private fun AuthScreen(setLoading: (Boolean) -> Unit, showMessage: (String) -> U
     }
 }
 
-private data class MatchData(val id: String, val title: String, val mode: String, val format: String, val dateLabel: String, val venue: String, val zone: String, val price: String, val ownerUid: String, val ownerName: String, val playersNeeded: Int, val confirmedCount: Int, val lat: Double?, val lon: Double?)
-private data class PlayerData(val uid: String, val name: String, val zone: String, val positions: String, val availability: String, val lat: Double?, val lon: Double?)
+private data class MatchData(val id: String, val title: String, val mode: String, val format: String, val dateLabel: String, val venue: String, val zone: String, val price: String, val ownerUid: String, val ownerName: String, val playersNeeded: Int, val status: String, val lat: Double?, val lon: Double?, val zoneLat: Double?, val zoneLon: Double?, val zoneRadius: Double?)
+private data class PlayerData(val uid: String, val name: String, val zone: String, val positions: String, val availability: String, val lat: Double?, val lon: Double?, val zoneLat: Double?, val zoneLon: Double?, val zoneRadius: Double?)
+
+// ---------- Zonas en el mapa ----------
+private const val DEFAULT_CITY = "Mendoza"
+private const val MIN_ZONE_RADIUS = 600.0     // metros: nunca se muestra un punto exacto
+private const val MAX_ZONE_RADIUS = 2500.0
+private const val SNAP_DEGREES = 0.004         // ~440 m: el centro del círculo se "redondea" para no delatar una dirección
+
+private data class GeoZone(val lat: Double, val lon: Double, val radius: Double)
+private data class MapItem(val isMatch: Boolean, val title: String, val detail: String, val lat: Double, val lon: Double, val radius: Double)
+private data class ZoneCluster(val lat: Double, val lon: Double, val radius: Double, val items: List<MapItem>)
+
+private fun distMeters(aLat: Double, aLon: Double, bLat: Double, bLon: Double): Double {
+    val dLat = Math.toRadians(bLat - aLat); val dLon = Math.toRadians(bLon - aLon)
+    val h = sin(dLat / 2).pow(2) + cos(Math.toRadians(aLat)) * cos(Math.toRadians(bLat)) * sin(dLon / 2).pow(2)
+    return 2 * 6371000.0 * asin(sqrt(h))
+}
+
+/** Convierte un texto (barrio, zona o dirección) en un centro + radio usando OpenStreetMap Nominatim. */
+private suspend fun geocodeZone(vararg queries: String): GeoZone? = withContext(Dispatchers.IO) {
+    var attempts = 0
+    for (raw in queries) {
+        val q = raw.trim()
+        if (q.isBlank()) continue
+        if (attempts++ > 0) delay(1100) // Nominatim permite 1 consulta por segundo
+        val full = if (q.contains(DEFAULT_CITY, ignoreCase = true)) q else "$q, $DEFAULT_CITY, Argentina"
+        try {
+            val url = URL("https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=ar&q=" + URLEncoder.encode(full, "UTF-8"))
+            val conn = url.openConnection() as HttpURLConnection
+            conn.setRequestProperty("User-Agent", "FutbolCerca/2.2 (com.futbolcerca.app)")
+            conn.connectTimeout = 8000; conn.readTimeout = 8000
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            val arr = JSONArray(body)
+            if (arr.length() > 0) {
+                val o = arr.getJSONObject(0)
+                val lat = o.getString("lat").toDouble(); val lon = o.getString("lon").toDouble()
+                var radius = MIN_ZONE_RADIUS
+                val bb = o.optJSONArray("boundingbox")
+                if (bb != null && bb.length() == 4) {
+                    val south = bb.getString(0).toDouble(); val north = bb.getString(1).toDouble(); val west = bb.getString(2).toDouble(); val east = bb.getString(3).toDouble()
+                    val diag = distMeters(south, west, north, east)
+                    radius = (diag / 2).coerceIn(MIN_ZONE_RADIUS, MAX_ZONE_RADIUS)
+                }
+                return@withContext GeoZone(lat, lon, radius)
+            }
+        } catch (_: Exception) { }
+    }
+    null
+}
+
+/** Agrupa personas/partidos que caen en la misma zona. Cada grupo se dibuja como un círculo con su cantidad. */
+private fun buildZones(items: List<MapItem>): List<ZoneCluster> {
+    class Group(var lat: Double, var lon: Double, var radius: Double, val members: MutableList<MapItem>)
+    val groups = mutableListOf<Group>()
+    items.forEach { item ->
+        val g = groups.firstOrNull { distMeters(it.lat, it.lon, item.lat, item.lon) <= max(it.radius, item.radius) }
+        if (g == null) groups += Group(item.lat, item.lon, item.radius, mutableListOf(item))
+        else {
+            g.members += item
+            g.lat = g.members.map { it.lat }.average(); g.lon = g.members.map { it.lon }.average()
+            g.radius = max(g.radius, item.radius)
+        }
+    }
+    return groups.map { g ->
+        val sLat = (g.lat / SNAP_DEGREES).roundToInt() * SNAP_DEGREES
+        val sLon = (g.lon / SNAP_DEGREES).roundToInt() * SNAP_DEGREES
+        val reach = g.members.maxOf { distMeters(sLat, sLon, it.lat, it.lon) + 350.0 }
+        ZoneCluster(sLat, sLon, max(g.radius, reach).coerceAtMost(MAX_ZONE_RADIUS * 2), g.members.toList())
+    }
+}
+
+private fun countIcon(context: Context, count: Int): BitmapDrawable {
+    val size = 96
+    val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(bmp)
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    paint.color = Green.toArgb(); canvas.drawCircle(size / 2f, size / 2f, size / 2f - 5f, paint)
+    paint.style = Paint.Style.STROKE; paint.strokeWidth = 6f; paint.color = android.graphics.Color.WHITE
+    canvas.drawCircle(size / 2f, size / 2f, size / 2f - 5f, paint)
+    paint.style = Paint.Style.FILL; paint.textAlign = Paint.Align.CENTER; paint.textSize = 46f; paint.isFakeBoldText = true
+    canvas.drawText(count.toString(), size / 2f, size / 2f + 16f, paint)
+    return BitmapDrawable(context.resources, bmp)
+}
+
+private data class AppRow(val uid: String, val name: String, val status: String)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -164,54 +255,46 @@ private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -
     var profile by remember { mutableStateOf(initial) }
     var matches by remember { mutableStateOf(listOf<MatchData>()) }
     var players by remember { mutableStateOf(listOf<PlayerData>()) }
-    var rosterPlayersByMatch by remember { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
-    val busyPlayerIds = rosterPlayersByMatch.values.flatten().toSet()
-    var selectedMatch by remember { mutableStateOf<MatchData?>(null) }
+    var selectedMatchId by remember { mutableStateOf<String?>(null) }
+    var selectedZone by remember { mutableStateOf<ZoneCluster?>(null) }
     DisposableEffect(uid) {
         val regs = mutableListOf<ListenerRegistration>()
-        regs += db.collection("matches").whereEqualTo("status", "open").addSnapshotListener { snap, e ->
+        regs += db.collection("matches").whereIn("status", listOf("open", "full")).addSnapshotListener { snap, e ->
             if (e != null) showMessage("Error al cargar partidos: ${e.localizedMessage}") else matches = snap?.documents.orEmpty().map { d ->
-                MatchData(d.id, d.getString("title") ?: "Partido", d.getString("mode") ?: "Mixto", d.getString("format") ?: "Fútbol 5", d.getString("dateLabel") ?: d.getString("dateTime") ?: "", d.getString("venue") ?: "", d.getString("zone") ?: "", d.getString("price") ?: "", d.getString("ownerUid") ?: "", d.getString("ownerName") ?: "", (d.getLong("playersNeeded") ?: 1L).toInt(), (d.getLong("confirmedCount") ?: 0L).toInt(), d.getDouble("lat"), d.getDouble("lon"))
+                MatchData(d.id, d.getString("title") ?: "Partido", d.getString("mode") ?: "Mixto", d.getString("format") ?: "Fútbol 5", d.getString("dateLabel") ?: d.getString("dateTime") ?: "", d.getString("venue") ?: "", d.getString("zone") ?: "", d.getString("price") ?: "", d.getString("ownerUid") ?: "", d.getString("ownerName") ?: "", (d.getLong("playersNeeded") ?: 1L).toInt(), d.getString("status") ?: "open", d.getDouble("lat"), d.getDouble("lon"), d.getDouble("zoneLat"), d.getDouble("zoneLon"), d.getDouble("zoneRadius"))
             }
         }
         regs += db.collection("users").whereEqualTo("role", "Jugador").addSnapshotListener { snap, e ->
             if (e != null) showMessage("Error al buscar jugadores: ${e.localizedMessage}") else players = snap?.documents.orEmpty().mapNotNull { d ->
-                if (d.id == uid) null else PlayerData(d.id, d.getString("displayName") ?: "Jugador", d.getString("zone") ?: "Zona no indicada", d.getString("positions") ?: "Sin posición", d.getString("availability") ?: "Sin disponibilidad", d.getDouble("lat"), d.getDouble("lon"))
+                if (d.id == uid) null else PlayerData(d.id, d.getString("displayName") ?: "Jugador", d.getString("zone") ?: "Zona no indicada", d.getString("positions") ?: "Sin posición", d.getString("availability") ?: "Sin disponibilidad", d.getDouble("lat"), d.getDouble("lon"), d.getDouble("zoneLat"), d.getDouble("zoneLon"), d.getDouble("zoneRadius"))
             }
         }
         onDispose { regs.forEach { it.remove() } }
     }
-    DisposableEffect(matches.map { it.id }.joinToString("|")) {
-        val rosterRegs = matches.map { match ->
-            db.collection("matches").document(match.id).collection("players").addSnapshotListener { snapshot, _ ->
-                rosterPlayersByMatch = rosterPlayersByMatch + (match.id to snapshot?.documents.orEmpty().map { it.id }.toSet())
-            }
-        }
-        onDispose { rosterRegs.forEach { it.remove() }; rosterPlayersByMatch = emptyMap() }
-    }
     val tabs = when (role) { "Jugador" -> listOf("Mapa", "Partidos", "Invitaciones", "Perfil"); "Capitán" -> listOf("Partidos", "Mapa", "Jugadores", "Solicitudes", "Publicar", "Perfil"); else -> listOf("Partidos", "Mapa", "Jugadores", "Publicar", "Solicitudes", "Perfil") }
     Scaffold(containerColor = Canvas, topBar = { CenterAlignedTopAppBar(title = { Text("⚽ FÚTBOL CERCA", fontWeight = FontWeight.Black, color = Color.White) }, colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Green)) }, bottomBar = { NavigationBar(containerColor = Color.White) { tabs.forEach { t -> NavigationBarItem(selected = tab == t, onClick = { tab = t }, icon = { Icon(when(t) { "Mapa" -> Icons.Default.Map; "Perfil" -> Icons.Default.Person; "Jugadores" -> Icons.Default.Groups; "Solicitudes" -> Icons.Default.MarkEmailUnread; "Publicar" -> Icons.Default.AddCircle; else -> Icons.Default.SportsSoccer }, null) }, label = { Text(t, fontSize = 10.sp) }) } } }) { padding ->
-        LazyColumn(Modifier.fillMaxSize().padding(padding).imePadding(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item { Column { Text("Hola, ${(profile["displayName"] as? String ?: "") .substringBefore(" ")} 👋", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold); Text("${if (role == "Cancha") "Administrá tus encuentros" else "El fútbol está más cerca"}", color = Color.Gray) } }
             when (tab) {
                 "Mapa" -> {
                     item { Text("Mapa en vivo", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
-                    item { InAppMap(players, matches, showMessage) }
-                    item { Text("Los marcadores aparecen cuando los usuarios guardan su ubicación desde Perfil. Se muestra una zona aproximada.", color = Color.Gray, fontSize = 12.sp) }
+                    item { InAppMap(players, matches) { selectedZone = it } }
+                    selectedZone?.let { z -> item { ZoneDetail(z) { selectedZone = null } } }
+                    item { Text("Cada círculo es una zona. El número indica cuántos jugadores y partidos hay ahí; tocá el círculo para ver quiénes son. Nunca se muestra una dirección exacta.", color = Color.Gray, fontSize = 12.sp) }
                 }
                 "Perfil" -> item { ProfileEditor(uid, profile, { profile = it }, showMessage) }
-                "Invitaciones" -> item { PlayerInvitations(matches, uid, showMessage) }
+                "Invitaciones" -> item { PlayerInvitations(matches, uid, profile["displayName"] as? String ?: "Jugador", showMessage) }
                 "Publicar" -> item { PublishForm(uid, profile, showMessage) }
                 "Jugadores" -> {
                     item { Text("Elegí jugadores para invitar", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
-                    items(players.filter { it.uid !in busyPlayerIds }) { p -> PlayerInviteCard(p, matches.filter { it.ownerUid == uid }, showMessage) }
-                    if (players.none { it.uid !in busyPlayerIds }) item { Text("No hay jugadores disponibles sin confirmar en otros partidos.", color = Color.Gray) }
+                    items(players) { p -> PlayerInviteCard(p, matches.filter { it.ownerUid == uid && it.status == "open" }, showMessage) }
                 }
                 "Solicitudes" -> {
                     val ownMatches = matches.filter { it.ownerUid == uid }
                     item { Text("Postulaciones recibidas", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
-                    items(ownMatches) { m -> Card { Column(Modifier.fillMaxWidth().padding(12.dp)) { Text(m.title, fontWeight = FontWeight.Bold); Button(onClick = { selectedMatch = m }) { Text("Ver solicitudes") } } } }
-                    selectedMatch?.let { m -> item { Applications(m.id, showMessage) } }
+                    if (ownMatches.isEmpty()) item { EmptyState("No tenés partidos publicados", "Publicá un partido para recibir postulaciones e invitar jugadores.") }
+                    items(ownMatches) { m -> Card { Column(Modifier.fillMaxWidth().padding(12.dp)) { Text(m.title, fontWeight = FontWeight.Bold); Text(if (m.status == "full") "COMPLETO" else "${m.playersNeeded} vacantes", color = Color.Gray); Button(onClick = { selectedMatchId = if (selectedMatchId == m.id) null else m.id }) { Text(if (selectedMatchId == m.id) "Ocultar" else "Ver solicitudes y confirmados") } } } }
+                    ownMatches.firstOrNull { it.id == selectedMatchId }?.let { m -> item(key = "panel-${m.id}") { MatchManagement(m, showMessage) } }
                 }
                 else -> {
                     item { Text(if (role == "Jugador") "Partidos disponibles" else "Mis partidos publicados", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
@@ -227,32 +310,66 @@ private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -
 }
 
 @Composable
-private fun InAppMap(players: List<PlayerData>, matches: List<MatchData>, showMessage: (String) -> Unit) {
+private fun InAppMap(players: List<PlayerData>, matches: List<MatchData>, onSelect: (ZoneCluster?) -> Unit) {
     val context = LocalContext.current
+    val zones = remember(players, matches) {
+        val items = mutableListOf<MapItem>()
+        players.forEach { p ->
+            val lat = p.zoneLat ?: p.lat; val lon = p.zoneLon ?: p.lon
+            if (lat != null && lon != null) items += MapItem(false, p.name, "${p.zone} · ${p.positions} · ${p.availability}", lat, lon, p.zoneRadius ?: 700.0)
+        }
+        matches.forEach { m ->
+            val lat = m.zoneLat ?: m.lat; val lon = m.zoneLon ?: m.lon
+            if (lat != null && lon != null) items += MapItem(true, m.title, "${m.dateLabel} · ${m.venue} · ${m.zone}", lat, lon, m.zoneRadius ?: 700.0)
+        }
+        buildZones(items)
+    }
     AndroidView(modifier = Modifier.fillMaxWidth().height(420.dp), factory = {
         MapView(it).apply { setTileSource(TileSourceFactory.MAPNIK); setMultiTouchControls(true); controller.setZoom(12.5); controller.setCenter(GeoPoint(-32.8895, -68.8458)) }
     }, update = { map ->
         map.overlays.clear()
-        players.filter { it.lat != null && it.lon != null }.forEach { p ->
-            Marker(map).apply { position = GeoPoint(p.lat!!, p.lon!!); title = "Jugador: ${p.name}"; snippet = "${p.zone} · ${p.availability}"; setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM); map.overlays.add(this) }
-        }
-        matches.filter { it.lat != null && it.lon != null }.forEach { m ->
-            Marker(map).apply { position = GeoPoint(m.lat!!, m.lon!!); title = m.title; snippet = "${m.dateLabel} · ${m.venue}"; setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM); map.overlays.add(this) }
+        zones.forEach { z ->
+            val center = GeoPoint(z.lat, z.lon)
+            val circle = Polygon(map)
+            circle.points = Polygon.pointsAsCircle(center, z.radius)
+            circle.fillPaint.color = android.graphics.Color.argb(70, 18, 59, 45)
+            circle.outlinePaint.color = android.graphics.Color.argb(200, 18, 59, 45)
+            circle.outlinePaint.strokeWidth = 4f
+            circle.setOnClickListener { _, _, _ -> onSelect(z); true }
+            map.overlays.add(circle)
+            val badge = Marker(map)
+            badge.position = center
+            badge.icon = countIcon(context, z.items.size)
+            badge.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+            badge.setOnMarkerClickListener { _, _ -> onSelect(z); true }
+            map.overlays.add(badge)
         }
         map.invalidate()
     })
 }
 
 @Composable
+private fun ZoneDetail(zone: ZoneCluster, onClose: () -> Unit) {
+    Card(shape = RoundedCornerShape(18.dp)) { Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("En esta zona (${zone.items.size})", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+            TextButton(onClick = onClose) { Text("Cerrar") }
+        }
+        zone.items.forEach { it -> Text("${if (it.isMatch) "⚽ Partido" else "👤 Jugador"}: ${it.title}", fontWeight = FontWeight.SemiBold); Text(it.detail, color = Color.Gray, fontSize = 12.sp) }
+    } }
+}
+
+@Composable
 private fun ProfileEditor(uid: String, data: Map<String, Any>, onSaved: (Map<String, Any>) -> Unit, showMessage: (String) -> Unit) {
     var name by remember { mutableStateOf(data["displayName"] as? String ?: "") }
-    var age by remember { mutableStateOf((data["age"] as? Long)?.toString() ?: "") }
+    var age by remember { mutableStateOf((data["age"] as? Number)?.toInt()?.toString() ?: "") }
     var gender by remember { mutableStateOf(data["gender"] as? String ?: "Masculino") }
     var positions by remember { mutableStateOf(data["positions"] as? String ?: "") }
     var skills by remember { mutableStateOf(data["skills"] as? String ?: "") }
     var availability by remember { mutableStateOf(data["availability"] as? String ?: "Ahora mismo") }
     var zone by remember { mutableStateOf(data["zone"] as? String ?: "") }
     var saving by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val locationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
@@ -274,16 +391,37 @@ private fun ProfileEditor(uid: String, data: Map<String, Any>, onSaved: (Map<Str
         OutlinedTextField(positions, { positions = it }, label = { Text("Posiciones") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(skills, { skills = it }, label = { Text("Habilidades / experiencia") }, modifier = Modifier.fillMaxWidth(), minLines = 2)
         Text("Disponibilidad"); listOf("Ahora mismo", "Esta noche", "Mañana", "Fines de semana").forEach { Row(verticalAlignment = Alignment.CenterVertically) { RadioButton(availability == it, { availability = it }); Text(it) } }
-        OutlinedTextField(zone, { zone = it }, label = { Text("Barrio o zona aproximada") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(zone, { zone = it }, label = { Text("Barrio, zona o dirección (se muestra como zona)") }, modifier = Modifier.fillMaxWidth())
         OutlinedButton(onClick = { locationPermission.launch(Manifest.permission.ACCESS_COARSE_LOCATION) }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.MyLocation, null); Spacer(Modifier.width(8.dp)); Text("Actualizar mi ubicación en el mapa") }
         Button(enabled = !saving, onClick = {
             if (name.isBlank()) { showMessage("Ingresá tu nombre."); return@Button }
             saving = true
-            val values = hashMapOf<String, Any>("displayName" to name.trim(), "gender" to gender, "positions" to positions.trim(), "skills" to skills.trim(), "availability" to availability, "zone" to zone.trim(), "profileUpdatedAt" to Timestamp.now())
-            age.toIntOrNull()?.let { values["age"] = it }
-            db.collection("users").document(uid).set(values, com.google.firebase.firestore.SetOptions.merge())
-                .addOnSuccessListener { saving = false; onSaved(data + values); showMessage("Perfil guardado.") }
-                .addOnFailureListener { saving = false; showMessage("No se pudo guardar el perfil: ${it.localizedMessage}") }
+            scope.launch {
+                val values = hashMapOf<String, Any>("displayName" to name.trim(), "gender" to gender, "positions" to positions.trim(), "skills" to skills.trim(), "availability" to availability, "zone" to zone.trim(), "profileUpdatedAt" to Timestamp.now())
+                age.toIntOrNull()?.let { values["age"] = it }
+                val local = HashMap(data); local.putAll(values)
+                val remote = HashMap<String, Any>(values)
+                var note = ""
+                val zoneText = zone.trim()
+                val zoneChanged = zoneText != (data["zone"] as? String ?: "") || data["zoneLat"] == null
+                if (zoneText.isBlank()) {
+                    remote["zoneLat"] = FieldValue.delete(); remote["zoneLon"] = FieldValue.delete(); remote["zoneRadius"] = FieldValue.delete()
+                    local.remove("zoneLat"); local.remove("zoneLon"); local.remove("zoneRadius")
+                } else if (zoneChanged) {
+                    val g = geocodeZone(zoneText)
+                    if (g != null) {
+                        remote["zoneLat"] = g.lat; remote["zoneLon"] = g.lon; remote["zoneRadius"] = g.radius
+                        local["zoneLat"] = g.lat; local["zoneLon"] = g.lon; local["zoneRadius"] = g.radius
+                    } else {
+                        remote["zoneLat"] = FieldValue.delete(); remote["zoneLon"] = FieldValue.delete(); remote["zoneRadius"] = FieldValue.delete()
+                        local.remove("zoneLat"); local.remove("zoneLon"); local.remove("zoneRadius")
+                        note = " No pude ubicar esa zona en el mapa: probá con barrio y ciudad (ej. \"Dorrego, Guaymallén\")."
+                    }
+                }
+                db.collection("users").document(uid).set(remote, SetOptions.merge())
+                    .addOnSuccessListener { saving = false; onSaved(local); showMessage("Perfil guardado.$note") }
+                    .addOnFailureListener { saving = false; showMessage("No se pudo guardar el perfil: ${it.localizedMessage}") }
+            }
         }, modifier = Modifier.fillMaxWidth()) { Text(if (saving) "Guardando…" else "Guardar perfil") }
     } }
 }
@@ -301,10 +439,7 @@ private fun requestCurrentLocation(context: Context, onResult: (Location?) -> Un
     } catch (_: SecurityException) { onResult(null) }
 }
 private fun saveLocation(uid: String, loc: Location, show: (String, Boolean) -> Unit) {
-    // Se guarda una ubicación aproximada (2 decimales, alrededor de 1 km), no la coordenada exacta.
-    val approximateLat = round(loc.latitude * 100.0) / 100.0
-    val approximateLon = round(loc.longitude * 100.0) / 100.0
-    db.collection("users").document(uid).set(mapOf("lat" to approximateLat, "lon" to approximateLon, "locationUpdatedAt" to Timestamp.now()), com.google.firebase.firestore.SetOptions.merge())
+    db.collection("users").document(uid).set(mapOf("lat" to loc.latitude, "lon" to loc.longitude, "locationUpdatedAt" to Timestamp.now()), com.google.firebase.firestore.SetOptions.merge())
         .addOnSuccessListener { show("Ubicación actualizada. Ya podés aparecer en el mapa.", true) }
         .addOnFailureListener { show("No se pudo guardar la ubicación: ${it.localizedMessage}", false) }
 }
@@ -314,6 +449,7 @@ private fun PublishForm(uid: String, profile: Map<String, Any>, showMessage: (St
     var title by remember { mutableStateOf("") }; var mode by remember { mutableStateOf("Mixto") }; var format by remember { mutableStateOf("Fútbol 5") }
     var date by remember { mutableStateOf("") }; var venue by remember { mutableStateOf("") }; var zone by remember { mutableStateOf(profile["zone"] as? String ?: "") }
     var price by remember { mutableStateOf("") }; var needed by remember { mutableStateOf("1") }; var saving by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val cal = remember { Calendar.getInstance().apply { add(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 20); set(Calendar.MINUTE, 0) } }
     fun pickDateTime() {
@@ -328,162 +464,206 @@ private fun PublishForm(uid: String, profile: Map<String, Any>, showMessage: (St
     Card(shape = RoundedCornerShape(22.dp)) { Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Crear partido", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         OutlinedTextField(title, { title = it }, label = { Text("Título de la convocatoria") }, modifier = Modifier.fillMaxWidth())
-        Text("Modalidad"); Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) { listOf("Masculino", "Femenino", "Mixto").forEach { FilterChip(mode == it, { mode = it }, label = { Text(it, fontSize = 11.sp) }) } }
-        Text("Formato"); Row(Modifier.horizontalScroll(rememberScrollState())) { listOf("Fútbol 5", "Fútbol 7").forEach { FilterChip(format == it, { format = it }, label = { Text(it) }); Spacer(Modifier.width(6.dp)) } }
+        Text("Modalidad"); Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) { listOf("Masculino", "Femenino", "Mixto").forEach { FilterChip(mode == it, { mode = it }, label = { Text(it, fontSize = 11.sp) }) } }
+        Text("Formato"); Row { listOf("Fútbol 5", "Fútbol 7").forEach { FilterChip(format == it, { format = it }, label = { Text(it) }); Spacer(Modifier.width(6.dp)) } }
         OutlinedButton(onClick = { pickDateTime() }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.CalendarMonth, null); Spacer(Modifier.width(8.dp)); Text(if (date.isBlank()) "Elegir fecha y hora" else date) }
         OutlinedTextField(venue, { venue = it }, label = { Text("Nombre de cancha / lugar") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(zone, { zone = it }, label = { Text("Barrio o zona") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(zone, { zone = it }, label = { Text("Barrio, zona o dirección") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(price, { price = it }, label = { Text("Costo por jugador (opcional)") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(needed, { needed = it.filter(Char::isDigit).take(2) }, label = { Text("Cupos totales del partido") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(needed, { needed = it.filter(Char::isDigit).take(2) }, label = { Text("Jugadores que faltan") }, modifier = Modifier.fillMaxWidth())
         Button(enabled = !saving, onClick = {
             if (title.isBlank() || date.isBlank() || venue.isBlank() || zone.isBlank()) { showMessage("Completá título, fecha, cancha y zona."); return@Button }
             saving = true
-            val data = hashMapOf<String, Any>("title" to title.trim(), "mode" to mode, "format" to format, "dateLabel" to date, "dateTime" to date, "eventAt" to Timestamp(cal.time), "venue" to venue.trim(), "zone" to zone.trim(), "price" to price.trim(), "playersNeeded" to (needed.toIntOrNull() ?: 1).coerceAtLeast(1), "confirmedCount" to 0, "ownerUid" to uid, "ownerName" to (profile["displayName"] as? String ?: "Organizador"), "status" to "open", "createdAt" to Timestamp.now())
-            (profile["lat"] as? Double)?.let { data["lat"] = it }; (profile["lon"] as? Double)?.let { data["lon"] = it }
-            db.collection("matches").add(data).addOnSuccessListener { saving = false; title = ""; showMessage("¡Partido publicado! Ya está visible para los demás.") }.addOnFailureListener { saving = false; showMessage("No se pudo publicar. Revisá las reglas de Firestore: ${it.localizedMessage}") }
+            scope.launch {
+                val data = hashMapOf<String, Any>("title" to title.trim(), "mode" to mode, "format" to format, "dateLabel" to date, "dateTime" to date, "eventAt" to Timestamp(cal.time), "venue" to venue.trim(), "zone" to zone.trim(), "price" to price.trim(), "playersNeeded" to (needed.toIntOrNull() ?: 1).coerceAtLeast(1), "ownerUid" to uid, "ownerName" to (profile["displayName"] as? String ?: "Organizador"), "status" to "open", "createdAt" to Timestamp.now())
+                val g = geocodeZone("${venue.trim()}, ${zone.trim()}", zone.trim())
+                if (g != null) { data["zoneLat"] = g.lat; data["zoneLon"] = g.lon; data["zoneRadius"] = g.radius }
+                else { (profile["lat"] as? Double)?.let { data["lat"] = it }; (profile["lon"] as? Double)?.let { data["lon"] = it } }
+                db.collection("matches").add(data)
+                    .addOnSuccessListener { saving = false; title = ""; showMessage(if (g != null) "¡Partido publicado! Ya está visible en el mapa y para los demás." else "¡Partido publicado! No pude ubicar la zona en el mapa; probá con barrio y ciudad.") }
+                    .addOnFailureListener { saving = false; showMessage("No se pudo publicar. Revisá las reglas de Firestore: ${it.localizedMessage}") }
+            }
         }, modifier = Modifier.fillMaxWidth()) { Text(if (saving) "Publicando…" else "Publicar partido") }
     } }
 }
 
 @Composable
 private fun MatchCard(m: MatchData, canApply: Boolean, uid: String, playerName: String, showMessage: (String) -> Unit) {
-    var applied by remember(m.id) { mutableStateOf(false) }
-    var alreadyConfirmed by remember(m.id) { mutableStateOf(false) }
-    var roster by remember(m.id) { mutableStateOf(listOf<String>()) }
-    val remaining = (m.playersNeeded - m.confirmedCount).coerceAtLeast(0)
-    DisposableEffect(m.id, uid) {
-        val matchRef = db.collection("matches").document(m.id)
-        val appReg = matchRef.collection("applications").document(uid).addSnapshotListener { snap, _ -> applied = snap?.getString("status") in listOf("pending", "accepted") }
-        val playerReg = matchRef.collection("players").document(uid).addSnapshotListener { snap, _ -> alreadyConfirmed = snap?.exists() == true }
-        val rosterReg = matchRef.collection("players").addSnapshotListener { snap, _ ->
-            roster = snap?.documents.orEmpty().mapNotNull { it.getString("playerName") }
-        }
-        onDispose { appReg.remove(); playerReg.remove(); rosterReg.remove() }
+    var appStatus by remember(m.id) { mutableStateOf<String?>(null) }
+    var joined by remember(m.id) { mutableStateOf(false) }
+    DisposableEffect(m.id, uid, canApply) {
+        if (!canApply) return@DisposableEffect onDispose { }
+        val base = db.collection("matches").document(m.id)
+        val r1 = base.collection("applications").document(uid).addSnapshotListener { s, _ -> appStatus = if (s != null && s.exists()) s.getString("status") else null }
+        val r2 = base.collection("participants").document(uid).addSnapshotListener { s, _ -> joined = s?.exists() == true }
+        onDispose { r1.remove(); r2.remove() }
     }
-    Card(shape = RoundedCornerShape(20.dp)) { Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Surface(color = if (remaining == 0) Color(0xFFFFE4E4) else Color(0xFFE7F4DD), shape = CircleShape) {
-                Text(if (remaining == 0) "COMPLETO" else "$remaining VACANTES", Modifier.padding(8.dp), color = if (remaining == 0) Color(0xFF9D2020) else Green, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+    val full = m.status == "full"
+    Card(shape = RoundedCornerShape(20.dp)) { Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) { Surface(color = if (full) Color(0xFFFFE0DD) else Color(0xFFE7F4DD), shape = CircleShape) { Text(if (full) "COMPLETO" else "${m.playersNeeded} VACANTES", Modifier.padding(8.dp), color = Green, fontSize = 10.sp, fontWeight = FontWeight.Bold) }; Spacer(Modifier.weight(1f)); Text(m.format, color = Green, fontWeight = FontWeight.Bold) }
+        Text(m.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold); Text("${m.mode} · ${m.dateLabel}"); Text("${m.venue} · ${m.zone}"); Text("Organiza: ${m.ownerName}"); Text("Costo: ${m.price.ifBlank { "A confirmar" }}")
+        if (canApply) {
+            val label = when {
+                joined || appStatus == "accepted" -> "✓ Confirmado en este partido"
+                appStatus == "pending" -> "Postulación enviada · esperando respuesta"
+                appStatus == "rejected" -> "Postulación rechazada"
+                full -> "Partido completo"
+                else -> "Postularme"
             }
-            Spacer(Modifier.weight(1f)); Text(m.format, color = Green, fontWeight = FontWeight.Bold)
-        }
-        Text(m.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Text("${m.mode} · ${m.dateLabel}"); Text("${m.venue} · ${m.zone}"); Text("Organiza: ${m.ownerName}"); Text("Costo: ${m.price.ifBlank { "A confirmar" }}")
-        Text("Plantel confirmado: ${m.confirmedCount}/${m.playersNeeded}", fontWeight = FontWeight.SemiBold, color = Green)
-        if (roster.isNotEmpty()) Text("Jugadores: ${roster.joinToString(", ")}", fontSize = 12.sp, color = Color.DarkGray)
-        if (canApply) Button(enabled = !applied && !alreadyConfirmed && remaining > 0, onClick = {
-            val values = mapOf("uid" to uid, "playerName" to playerName, "status" to "pending", "createdAt" to Timestamp.now())
-            db.collection("matches").document(m.id).collection("applications").document(uid).set(values)
-                .addOnSuccessListener { applied = true; showMessage("Postulación enviada.") }
-                .addOnFailureListener { showMessage("No se pudo postular: ${it.localizedMessage}") }
-        }, modifier = Modifier.fillMaxWidth()) {
-            Text(when { alreadyConfirmed -> "Ya estás confirmado"; remaining == 0 -> "Partido completo"; applied -> "Postulación enviada"; else -> "Postularme" })
+            val enabled = !joined && appStatus == null && !full
+            Button(enabled = enabled, onClick = {
+                val values = mapOf("uid" to uid, "playerName" to playerName, "status" to "pending", "createdAt" to Timestamp.now())
+                db.collection("matches").document(m.id).collection("applications").document(uid).set(values)
+                    .addOnSuccessListener { showMessage("Postulación enviada. El organizador la verá en su pestaña Solicitudes.") }
+                    .addOnFailureListener { showMessage("No se pudo postular: ${it.localizedMessage}") }
+            }, modifier = Modifier.fillMaxWidth()) { Text(label) }
         }
     } }
-}
-
-private fun confirmPlayer(matchId: String, playerUid: String, source: String, showMessage: (String) -> Unit) {
-    val matchRef = db.collection("matches").document(matchId)
-    val requestRef = matchRef.collection(source).document(playerUid)
-    val playerRef = matchRef.collection("players").document(playerUid)
-    db.runTransaction { transaction ->
-        val match = transaction.get(matchRef)
-        val request = transaction.get(requestRef)
-        val existingPlayer = transaction.get(playerRef)
-        if (!match.exists()) throw IllegalStateException("El partido ya no existe.")
-        if (!request.exists()) throw IllegalStateException("La solicitud ya no está disponible.")
-        if (existingPlayer.exists()) throw IllegalStateException("Este jugador ya está confirmado.")
-        if (request.getString("status") != "pending") throw IllegalStateException("Esta solicitud ya fue procesada.")
-        val capacity = (match.getLong("playersNeeded") ?: 1L).toInt()
-        val confirmed = (match.getLong("confirmedCount") ?: 0L).toInt()
-        if (confirmed >= capacity) throw IllegalStateException("El partido ya está completo.")
-        val name = request.getString("playerName") ?: request.getString("displayName") ?: "Jugador"
-        val rosterData = hashMapOf<String, Any>("uid" to playerUid, "playerName" to name, "joinedAt" to Timestamp.now(), "source" to source)
-        transaction.update(requestRef, "status", "accepted")
-        transaction.set(playerRef, rosterData)
-        transaction.update(matchRef, "confirmedCount", confirmed + 1)
-        null
-    }.addOnSuccessListener { showMessage("Jugador confirmado y agregado al plantel.") }
-        .addOnFailureListener { showMessage(it.localizedMessage ?: "No se pudo confirmar al jugador.") }
 }
 
 @Composable
 private fun PlayerInviteCard(player: PlayerData, ownMatches: List<MatchData>, showMessage: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
-    Card { Column(Modifier.fillMaxWidth().padding(12.dp)) { Text(player.name, fontWeight = FontWeight.Bold); Text("${player.zone} · ${player.positions}"); Text("Disponible: ${player.availability}"); TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Cerrar" else "Invitar a un partido") }; if (expanded) ownMatches.filter { it.confirmedCount < it.playersNeeded }.forEach { m -> TextButton(onClick = { val invite = mapOf("playerUid" to player.uid, "playerName" to player.name, "matchId" to m.id, "matchTitle" to m.title, "ownerUid" to m.ownerUid, "status" to "pending", "createdAt" to Timestamp.now()); db.collection("matches").document(m.id).collection("invitations").document(player.uid).set(invite).addOnSuccessListener { showMessage("Invitación enviada a ${player.name}.") }.addOnFailureListener { showMessage("No se pudo invitar: ${it.localizedMessage}") } }) { Text("${m.title} · Invitar") } } } }
+    Card { Column(Modifier.fillMaxWidth().padding(12.dp)) {
+        Text(player.name, fontWeight = FontWeight.Bold); Text("${player.zone} · ${player.positions}"); Text("Disponible: ${player.availability}")
+        TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Cerrar" else "Invitar a un partido") }
+        if (expanded) {
+            if (ownMatches.isEmpty()) Text("Necesitás un partido abierto para invitar.", color = Color.Gray)
+            ownMatches.forEach { m ->
+                TextButton(onClick = {
+                    val ref = db.collection("matches").document(m.id).collection("invitations").document(player.uid)
+                    ref.get().addOnSuccessListener { existing ->
+                        if (existing.exists()) {
+                            showMessage("Ya invitaste a ${player.name} a este partido (estado: ${statusLabel(existing.getString("status"))}).")
+                        } else {
+                            val invite = mapOf("playerUid" to player.uid, "playerName" to player.name, "matchId" to m.id, "matchTitle" to m.title, "ownerUid" to m.ownerUid, "status" to "pending", "createdAt" to Timestamp.now())
+                            ref.set(invite)
+                                .addOnSuccessListener { showMessage("Invitación enviada a ${player.name}.") }
+                                .addOnFailureListener { showMessage("No se pudo invitar: ${it.localizedMessage}") }
+                        }
+                    }.addOnFailureListener { showMessage("No se pudo invitar: ${it.localizedMessage}") }
+                }) { Text("${m.title} · Invitar") }
+            }
+        }
+    } }
+}
+
+private fun statusLabel(status: String?) = when (status) { "accepted" -> "aceptada"; "rejected" -> "rechazada"; else -> "pendiente" }
+
+/** Confirma a un jugador en el partido y descuenta una vacante, todo junto (o nada). */
+private fun joinMatch(matchId: String, playerUid: String, playerName: String, via: String, responseRef: com.google.firebase.firestore.DocumentReference, responseFields: Map<String, Any>, okMessage: String, showMessage: (String) -> Unit) {
+    val matchRef = db.collection("matches").document(matchId)
+    val partRef = matchRef.collection("participants").document(playerUid)
+    db.runTransaction(Transaction.Function<Boolean> { tx ->
+        val match = tx.get(matchRef)
+        val part = tx.get(partRef)
+        if (!part.exists()) {
+            val needed = match.getLong("playersNeeded") ?: 0L
+            if (needed <= 0L) throw FirebaseFirestoreException("Este partido ya está completo.", FirebaseFirestoreException.Code.ABORTED)
+            val left = needed - 1L
+            tx.set(partRef, mapOf("uid" to playerUid, "name" to playerName, "via" to via, "joinedAt" to Timestamp.now()))
+            tx.update(matchRef, mapOf("playersNeeded" to left, "status" to if (left <= 0L) "full" else "open"))
+        }
+        tx.update(responseRef, responseFields)
+        true
+    }).addOnSuccessListener { showMessage(okMessage) }
+        .addOnFailureListener { showMessage(it.localizedMessage ?: "No se pudo completar la acción") }
 }
 
 @Composable
-private fun Applications(matchId: String, showMessage: (String) -> Unit) {
-    var applications by remember { mutableStateOf(listOf<Map<String, Any>>()) }
-    DisposableEffect(matchId) {
-        val reg = db.collection("matches").document(matchId).collection("applications")
-            .addSnapshotListener { snapshot, error ->
-                if (error != null) showMessage("Error de solicitudes: ${error.localizedMessage}")
-                else applications = snapshot?.documents.orEmpty().mapNotNull { it.data }
-            }
-        onDispose { reg.remove() }
+private fun MatchManagement(m: MatchData, showMessage: (String) -> Unit) {
+    var applications by remember(m.id) { mutableStateOf(listOf<AppRow>()) }
+    var invitations by remember(m.id) { mutableStateOf(listOf<AppRow>()) }
+    var participants by remember(m.id) { mutableStateOf(listOf<AppRow>()) }
+    DisposableEffect(m.id) {
+        val base = db.collection("matches").document(m.id)
+        val r1 = base.collection("applications").addSnapshotListener { snap, e ->
+            if (e != null) showMessage("Error de solicitudes: ${e.localizedMessage}")
+            else applications = snap?.documents.orEmpty().map { AppRow(it.id, it.getString("playerName") ?: "Jugador", it.getString("status") ?: "pending") }
+        }
+        val r2 = base.collection("invitations").addSnapshotListener { snap, e ->
+            if (e == null) invitations = snap?.documents.orEmpty().map { AppRow(it.id, it.getString("playerName") ?: "Jugador", it.getString("status") ?: "pending") }
+        }
+        val r3 = base.collection("participants").addSnapshotListener { snap, e ->
+            if (e == null) participants = snap?.documents.orEmpty().map { AppRow(it.id, it.getString("name") ?: "Jugador", "accepted") }
+        }
+        onDispose { r1.remove(); r2.remove(); r3.remove() }
     }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Solicitudes recibidas", fontWeight = FontWeight.Bold)
-        if (applications.isEmpty()) Text("Todavía no hay postulaciones.")
-        applications.forEach { application ->
-            val playerUid = application["uid"] as? String ?: ""
-            Card {
-                Column(Modifier.padding(12.dp)) {
-                    Text(application["playerName"] as? String ?: "Jugador", fontWeight = FontWeight.Bold)
-                    Text("Estado: ${application["status"] ?: "pending"}")
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Button(enabled = (application["status"] as? String) == "pending", onClick = {
-                            confirmPlayer(matchId, playerUid, "applications", showMessage)
-                        }, modifier = Modifier.fillMaxWidth()) { Text("Aceptar y sumar al plantel") }
-                        TextButton(enabled = (application["status"] as? String) == "pending", onClick = {
-                            db.collection("matches").document(matchId).collection("applications").document(playerUid)
-                                .update("status", "rejected")
-                                .addOnSuccessListener { showMessage("Solicitud rechazada.") }
-                                .addOnFailureListener { showMessage(it.localizedMessage ?: "Error al rechazar") }
-                        }, modifier = Modifier.fillMaxWidth()) { Text("Rechazar") }
-                    }
+        Text("${m.title} · ${if (m.status == "full") "completo" else "${m.playersNeeded} vacantes"}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+
+        Text("Confirmados (${participants.size})", fontWeight = FontWeight.Bold)
+        if (participants.isEmpty()) Text("Todavía no hay jugadores confirmados.", color = Color.Gray)
+        participants.forEach { p -> Text("✓ ${p.name}") }
+
+        Text("Postulaciones recibidas", fontWeight = FontWeight.Bold)
+        if (applications.isEmpty()) Text("Todavía no hay postulaciones.", color = Color.Gray)
+        applications.sortedBy { it.status != "pending" }.forEach { a ->
+            Card { Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                Text(a.name, fontWeight = FontWeight.Bold)
+                Text("Estado: ${statusLabel(a.status)}", color = Color.Gray)
+                if (a.status == "pending") Row {
+                    Button(onClick = {
+                        val ref = db.collection("matches").document(m.id).collection("applications").document(a.uid)
+                        joinMatch(m.id, a.uid, a.name, "application", ref, mapOf("status" to "accepted", "decidedAt" to Timestamp.now()), "${a.name} quedó confirmado en el partido.", showMessage)
+                    }) { Text("Aceptar") }
+                    TextButton(onClick = {
+                        db.collection("matches").document(m.id).collection("applications").document(a.uid)
+                            .update(mapOf("status" to "rejected", "decidedAt" to Timestamp.now()))
+                            .addOnSuccessListener { showMessage("Solicitud rechazada.") }
+                            .addOnFailureListener { showMessage(it.localizedMessage ?: "Error al rechazar") }
+                    }) { Text("Rechazar") }
                 }
-            }
+            } }
         }
+
+        Text("Invitaciones enviadas", fontWeight = FontWeight.Bold)
+        if (invitations.isEmpty()) Text("No enviaste invitaciones para este partido.", color = Color.Gray)
+        invitations.forEach { i -> Text("${i.name} · ${statusLabel(i.status)}") }
     }
 }
 
 @Composable
-private fun PlayerInvitations(matches: List<MatchData>, uid: String, showMessage: (String) -> Unit) {
-    var invitations by remember { mutableStateOf(listOf<MatchData>()) }
-    LaunchedEffect(matches.map { it.id }.joinToString(), uid) {
-        val found = mutableListOf<MatchData>()
-        matches.forEach { match ->
-            try {
-                val snap = db.collection("matches").document(match.id).collection("invitations").document(uid).get().await()
-                if (snap.exists() && snap.getString("status") == "pending") found.add(match)
-            } catch (_: Exception) { }
+private fun PlayerInvitations(matches: List<MatchData>, uid: String, playerName: String, showMessage: (String) -> Unit) {
+    var statuses by remember { mutableStateOf(mapOf<String, String>()) }
+    val ids = matches.map { it.id }
+    DisposableEffect(ids.joinToString(","), uid) {
+        val regs = ids.map { id ->
+            db.collection("matches").document(id).collection("invitations").document(uid).addSnapshotListener { snap, _ ->
+                statuses = if (snap != null && snap.exists()) statuses + (id to (snap.getString("status") ?: "pending")) else statuses - id
+            }
         }
-        invitations = found
+        onDispose { regs.forEach { it.remove() } }
     }
+    val pending = matches.filter { statuses[it.id] == "pending" }
+    val answered = matches.filter { statuses[it.id] == "accepted" || statuses[it.id] == "rejected" }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Invitaciones recibidas", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        if (invitations.isEmpty()) Text("Todavía no tenés invitaciones pendientes.", color = Color.Gray)
-        invitations.forEach { match ->
+        if (pending.isEmpty()) Text("Todavía no tenés invitaciones pendientes.", color = Color.Gray)
+        pending.forEach { match ->
             Card {
                 Column(Modifier.fillMaxWidth().padding(12.dp)) {
                     Text(match.title, fontWeight = FontWeight.Bold)
                     Text("${match.dateLabel} · ${match.venue}")
+                    Text("Organiza: ${match.ownerName} · ${if (match.status == "full") "completo" else "${match.playersNeeded} vacantes"}", color = Color.Gray)
                     Row {
-                        Button(onClick = {
-                            confirmPlayer(match.id, uid, "invitations", showMessage)
+                        Button(enabled = match.status == "open", onClick = {
+                            val ref = db.collection("matches").document(match.id).collection("invitations").document(uid)
+                            joinMatch(match.id, uid, playerName, "invitation", ref, mapOf("status" to "accepted", "respondedAt" to Timestamp.now()), "¡Listo! Quedaste confirmado en ${match.title}.", showMessage)
                         }) { Text("Aceptar") }
                         TextButton(onClick = {
                             db.collection("matches").document(match.id).collection("invitations").document(uid)
-                                .update("status", "rejected")
+                                .update(mapOf("status" to "rejected", "respondedAt" to Timestamp.now()))
                                 .addOnSuccessListener { showMessage("Invitación rechazada.") }
                                 .addOnFailureListener { showMessage(it.localizedMessage ?: "No se pudo rechazar") }
                         }) { Text("Rechazar") }
                     }
                 }
             }
+        }
+        if (answered.isNotEmpty()) {
+            Text("Respondidas", fontWeight = FontWeight.Bold)
+            answered.forEach { match -> Text("${match.title} · ${statusLabel(statuses[match.id])}", color = Color.Gray) }
         }
     }
 }
