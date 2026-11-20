@@ -1,30 +1,31 @@
-# Fútbol Cerca 2.0
+# Fútbol Cerca 2.1.0 — base de corrección
 
-Proyecto Android Kotlin + Jetpack Compose + Firebase Authentication + Cloud Firestore.
+Proyecto Android Kotlin + Jetpack Compose + Firebase Authentication/Firestore + OpenStreetMap (osmdroid).
 
-## Configuración necesaria
-1. Conservar `app/google-services.json` del proyecto Firebase existente.
-2. En Firebase Authentication, habilitar correo/contraseña.
-3. Crear Cloud Firestore.
-4. Publicar el contenido de `firestore.rules` en Firestore > Rules.
-5. Subir el contenido del ZIP a la rama `version-2-funcional` (reemplazando los archivos del proyecto).
-6. Ejecutar GitHub Actions > Compilar Fútbol Cerca APK.
+## Cambios incluidos
+- Interfaz renovada con navegación inferior y tarjetas Material 3.
+- Mapa OpenStreetMap integrado dentro de la app (no abre el navegador).
+- Marcadores de jugadores y partidos que tengan coordenadas guardadas.
+- Solicitud de permiso de ubicación y guardado de latitud/longitud aproximadas desde Perfil.
+- Publicación de partidos en Firestore con fecha y hora mediante selectores nativos de calendario y reloj.
+- Listado de partidos en tiempo real y postulaciones guardadas en Firestore.
+- Selección de jugadores e invitaciones por partido; pantalla para responder invitaciones.
+- Pantalla para revisar y aceptar/rechazar postulaciones.
+- Reglas Firestore para usuarios, partidos, postulaciones e invitaciones.
+- WhatsApp CodeMarket: +54 9 261 511-7220.
 
-## Funciones incluidas en esta base
-- Registro e inicio de sesión con Firebase.
-- Roles Jugador, Capitán y Cancha.
-- Perfil deportivo guardado en Firestore.
-- Publicación y listado en tiempo real de partidos.
-- Postulaciones persistentes por jugador y partido.
-- Revisión y aceptación/rechazo de postulaciones por el organizador.
-- Búsqueda de perfiles de jugadores para capitanes.
-- Acceso a OpenStreetMap mediante búsqueda de zona aproximada.
-- Contacto de licencias con CodeMarket por WhatsApp: +54 9 261 511-7220.
-- Número de versión Android 2.0.0.
+## IMPORTANTE: publicar las reglas de Firestore
+Subir `firestore.rules` a GitHub **no cambia automáticamente** las reglas activas del proyecto Firebase. Para que crear partidos, postularse e invitar jugadores funcione, hay que abrir Firebase Console → Firestore Database → Rules, reemplazar el contenido por `firestore.rules` y presionar **Publicar**. No cambies las reglas de Authentication.
 
-## Límites y seguridad
-Esta entrega no incorpora GPS en segundo plano, fotos/videos, notificaciones push, pagos automáticos ni servidor propio. OpenStreetMap se abre en el navegador; no es un mapa embebido ni calcula distancias. Las cuentas de capitán/cancha quedan pendientes de verificación, pero esta versión no implementa revisión documental.
+## Mapa y privacidad
+El mapa usa OpenStreetMap sin Google Maps ni facturación de Google. El usuario debe entrar en Perfil y tocar “Actualizar mi ubicación en el mapa”, aceptar el permiso y tener activada la ubicación del teléfono. Se guarda latitud/longitud del teléfono para mostrar un marcador; la interfaz pide además una zona/barrio aproximado. No se debe usar una dirección particular como zona pública.
 
-La prueba de 7 días se muestra como condición comercial, pero todavía no existe un sistema antifraude completo ni un panel de emisión/validación de licencias. No se debe presentar esa protección como implementada. Los límites gratuitos de Firebase aplican; monitorear el consumo.
+Los marcadores solo pueden aparecer para cuentas que hayan guardado coordenadas. Los perfiles antiguos no tienen ubicación automáticamente: cada usuario debe actualizarla. Los mapas dependen de conexión a Internet para cargar las teselas de OpenStreetMap.
 
-Las reglas permiten leer perfiles autenticados para búsqueda de jugadores; no publicar datos sensibles ni direcciones exactas. Esta base requiere pruebas funcionales reales en Firebase antes de distribuirse.
+## Compilación
+GitHub Actions ejecuta `gradle assembleDebug` y publica el artefacto `app-debug.apk`. La versión usa `applicationId` `com.futbolcerca.app`, `versionCode` 3 y `versionName` 2.1.0.
+
+## Límites y verificación pendiente
+Este código se preparó para corregir los problemas reportados, pero **no fue compilado ni probado contra el Firebase real en este entorno**. Hay que comprobar el resultado de GitHub Actions y luego probar registro, publicación, mapa, postulación e invitaciones con dos cuentas distintas. La prueba de 7 días y el sistema de licencias siguen sin validación segura ni panel de administración; no se presentan como funciones terminadas. No incluye almacenamiento de fotos/videos ni notificaciones push.
+
+No se necesita Firebase Blaze, Google Maps billing, Cloud Functions ni un servidor pago para estas funciones básicas.

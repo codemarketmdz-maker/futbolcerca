@@ -2,15 +2,16 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
-    function own(uid) { return signedIn() && request.auth.uid == uid; }
+    function isOwner(matchId) {
+      return signedIn() && get(/databases/$(database)/documents/matches/$(matchId)).data.ownerUid == request.auth.uid;
+    }
 
     match /users/{uid} {
-      allow create: if own(uid)
+      allow create: if signedIn() && request.auth.uid == uid
         && request.resource.data.role in ['Jugador', 'Capitán', 'Cancha'];
       allow read: if signedIn();
-      allow update: if own(uid)
-        && request.resource.data.role == resource.data.role
-        && request.resource.data.trialStartedAt == resource.data.trialStartedAt;
+      allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.role == resource.data.role;
       allow delete: if false;
     }
 
@@ -19,22 +20,30 @@ service cloud.firestore {
       allow create: if signedIn()
         && request.resource.data.ownerUid == request.auth.uid
         && request.resource.data.status == 'open';
-      allow update: if signedIn()
-        && resource.data.ownerUid == request.auth.uid
+      allow update: if signedIn() && resource.data.ownerUid == request.auth.uid
         && request.resource.data.ownerUid == resource.data.ownerUid;
       allow delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
 
-      match /applications/{applicantUid} {
-        allow read: if signedIn() &&
-          (request.auth.uid == applicantUid ||
-           get(/databases/$(database)/documents/matches/$(matchId)).data.ownerUid == request.auth.uid);
-        allow create: if own(applicantUid)
+      match /applications/{playerUid} {
+        allow read: if signedIn() && (request.auth.uid == playerUid || isOwner(matchId));
+        allow create: if signedIn() && request.auth.uid == playerUid
           && request.resource.data.uid == request.auth.uid
           && request.resource.data.status == 'pending';
-        allow update: if signedIn()
-          && get(/databases/$(database)/documents/matches/$(matchId)).data.ownerUid == request.auth.uid
-          && request.resource.data.uid == resource.data.uid;
-        allow delete: if own(applicantUid);
+        allow update: if isOwner(matchId)
+          && request.resource.data.uid == resource.data.uid
+          && request.resource.data.status in ['accepted', 'rejected'];
+        allow delete: if signedIn() && request.auth.uid == playerUid;
+      }
+
+      match /invitations/{playerUid} {
+        allow read: if signedIn() && (request.auth.uid == playerUid || isOwner(matchId));
+        allow create: if isOwner(matchId)
+          && request.resource.data.playerUid == playerUid
+          && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.status == 'pending';
+        allow update: if signedIn() && request.auth.uid == playerUid
+          && request.resource.data.playerUid == resource.data.playerUid;
+        allow delete: if isOwner(matchId);
       }
     }
   }
