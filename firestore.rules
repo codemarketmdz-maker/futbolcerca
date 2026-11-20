@@ -2,8 +2,9 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
+    function matchPath(matchId) { return /databases/$(database)/documents/matches/$(matchId); }
     function isOwner(matchId) {
-      return signedIn() && get(/databases/$(database)/documents/matches/$(matchId)).data.ownerUid == request.auth.uid;
+      return signedIn() && get(matchPath(matchId)).data.ownerUid == request.auth.uid;
     }
 
     match /users/{uid} {
@@ -19,9 +20,18 @@ service cloud.firestore {
       allow read: if signedIn();
       allow create: if signedIn()
         && request.resource.data.ownerUid == request.auth.uid
-        && request.resource.data.status == 'open';
-      allow update: if signedIn() && resource.data.ownerUid == request.auth.uid
-        && request.resource.data.ownerUid == resource.data.ownerUid;
+        && request.resource.data.status == 'open'
+        && request.resource.data.confirmedCount == 0
+        && request.resource.data.playersNeeded >= 1;
+      // El contador solo puede aumentar de a uno al confirmar un jugador.
+      allow update: if signedIn()
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.confirmedCount == (resource.data.keys().hasAny(['confirmedCount']) ? resource.data.confirmedCount : 0) + 1
+        && request.resource.data.confirmedCount <= resource.data.playersNeeded
+        && request.resource.data.playersNeeded == resource.data.playersNeeded
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['confirmedCount'])
+        && (resource.data.ownerUid == request.auth.uid
+          || (existsAfter(/databases/$(database)/documents/matches/$(matchId)/invitations/$(request.auth.uid)) && getAfter(/databases/$(database)/documents/matches/$(matchId)/invitations/$(request.auth.uid)).data.status == 'accepted'));
       allow delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
 
       match /applications/{playerUid} {
@@ -30,8 +40,11 @@ service cloud.firestore {
           && request.resource.data.uid == request.auth.uid
           && request.resource.data.status == 'pending';
         allow update: if isOwner(matchId)
+          && resource.data.status == 'pending'
           && request.resource.data.uid == resource.data.uid
-          && request.resource.data.status in ['accepted', 'rejected'];
+          && request.resource.data.status in ['accepted', 'rejected']
+          && (request.resource.data.status != 'accepted'
+            || (existsAfter(/databases/$(database)/documents/matches/$(matchId)/players/$(playerUid)) && getAfter(/databases/$(database)/documents/matches/$(matchId)/players/$(playerUid)).data.uid == playerUid));
         allow delete: if signedIn() && request.auth.uid == playerUid;
       }
 
@@ -42,7 +55,24 @@ service cloud.firestore {
           && request.resource.data.ownerUid == request.auth.uid
           && request.resource.data.status == 'pending';
         allow update: if signedIn() && request.auth.uid == playerUid
-          && request.resource.data.playerUid == resource.data.playerUid;
+          && resource.data.status == 'pending'
+          && request.resource.data.playerUid == resource.data.playerUid
+          && request.resource.data.status in ['accepted', 'rejected']
+          && (request.resource.data.status != 'accepted'
+            || (existsAfter(/databases/$(database)/documents/matches/$(matchId)/players/$(playerUid)) && getAfter(/databases/$(database)/documents/matches/$(matchId)/players/$(playerUid)).data.uid == playerUid));
+        allow delete: if isOwner(matchId);
+      }
+
+      match /players/{playerUid} {
+        allow read: if signedIn();
+        allow create: if signedIn()
+          && request.resource.data.uid == playerUid
+          && (isOwner(matchId) || request.auth.uid == playerUid)
+          && ((existsAfter(/databases/$(database)/documents/matches/$(matchId)/applications/$(playerUid))
+              && getAfter(/databases/$(database)/documents/matches/$(matchId)/applications/$(playerUid)).data.status == 'accepted')
+            || (existsAfter(/databases/$(database)/documents/matches/$(matchId)/invitations/$(playerUid))
+              && getAfter(/databases/$(database)/documents/matches/$(matchId)/invitations/$(playerUid)).data.status == 'accepted'));
+        allow update: if false;
         allow delete: if isOwner(matchId);
       }
     }

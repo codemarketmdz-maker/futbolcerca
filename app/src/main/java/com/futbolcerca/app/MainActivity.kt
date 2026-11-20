@@ -15,6 +15,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -42,6 +45,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.delay
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
@@ -52,6 +56,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import kotlin.math.round
 
 private val db get() = FirebaseFirestore.getInstance()
 private val auth get() = FirebaseAuth.getInstance()
@@ -82,9 +87,19 @@ private fun Root() {
     LaunchedEffect(user?.uid) {
         val u = user ?: return@LaunchedEffect
         loading = true
-        db.collection("users").document(u.uid).get()
-            .addOnSuccessListener { profile = it.data; loading = false }
-            .addOnFailureListener { message = it.localizedMessage ?: "No se pudo cargar el perfil"; loading = false }
+        profile = null
+        try {
+            var loaded: Map<String, Any>? = null
+            repeat(5) { attempt ->
+                val snapshot = db.collection("users").document(u.uid).get().await()
+                if (snapshot.exists()) loaded = snapshot.data
+                if (loaded == null && attempt < 4) delay(500L)
+            }
+            profile = loaded
+            if (loaded == null) message = "No encontramos tu perfil. Cerrá sesión y volvé a ingresar; si acabás de registrarte, verificá tu conexión."
+        } catch (e: Exception) {
+            message = e.localizedMessage ?: "No se pudo cargar el perfil"
+        } finally { loading = false }
     }
     when {
         user == null -> AuthScreen({ loading = it }, { message = it })
@@ -101,7 +116,7 @@ private fun AuthScreen(setLoading: (Boolean) -> Unit, showMessage: (String) -> U
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var role by remember { mutableStateOf("Jugador") }
-    Column(Modifier.fillMaxSize().background(Canvas).padding(24.dp), verticalArrangement = Arrangement.Center) {
+    Column(Modifier.fillMaxSize().background(Canvas).verticalScroll(rememberScrollState()).imePadding().padding(24.dp), verticalArrangement = Arrangement.Center) {
         Surface(color = Green, shape = RoundedCornerShape(24.dp), modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(Icons.Default.SportsSoccer, null, tint = Lime, modifier = Modifier.size(48.dp))
@@ -137,7 +152,7 @@ private fun AuthScreen(setLoading: (Boolean) -> Unit, showMessage: (String) -> U
     }
 }
 
-private data class MatchData(val id: String, val title: String, val mode: String, val format: String, val dateLabel: String, val venue: String, val zone: String, val price: String, val ownerUid: String, val ownerName: String, val playersNeeded: Int, val lat: Double?, val lon: Double?)
+private data class MatchData(val id: String, val title: String, val mode: String, val format: String, val dateLabel: String, val venue: String, val zone: String, val price: String, val ownerUid: String, val ownerName: String, val playersNeeded: Int, val confirmedCount: Int, val lat: Double?, val lon: Double?)
 private data class PlayerData(val uid: String, val name: String, val zone: String, val positions: String, val availability: String, val lat: Double?, val lon: Double?)
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -149,12 +164,14 @@ private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -
     var profile by remember { mutableStateOf(initial) }
     var matches by remember { mutableStateOf(listOf<MatchData>()) }
     var players by remember { mutableStateOf(listOf<PlayerData>()) }
+    var rosterPlayersByMatch by remember { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
+    val busyPlayerIds = rosterPlayersByMatch.values.flatten().toSet()
     var selectedMatch by remember { mutableStateOf<MatchData?>(null) }
     DisposableEffect(uid) {
         val regs = mutableListOf<ListenerRegistration>()
         regs += db.collection("matches").whereEqualTo("status", "open").addSnapshotListener { snap, e ->
             if (e != null) showMessage("Error al cargar partidos: ${e.localizedMessage}") else matches = snap?.documents.orEmpty().map { d ->
-                MatchData(d.id, d.getString("title") ?: "Partido", d.getString("mode") ?: "Mixto", d.getString("format") ?: "Fútbol 5", d.getString("dateLabel") ?: d.getString("dateTime") ?: "", d.getString("venue") ?: "", d.getString("zone") ?: "", d.getString("price") ?: "", d.getString("ownerUid") ?: "", d.getString("ownerName") ?: "", (d.getLong("playersNeeded") ?: 1L).toInt(), d.getDouble("lat"), d.getDouble("lon"))
+                MatchData(d.id, d.getString("title") ?: "Partido", d.getString("mode") ?: "Mixto", d.getString("format") ?: "Fútbol 5", d.getString("dateLabel") ?: d.getString("dateTime") ?: "", d.getString("venue") ?: "", d.getString("zone") ?: "", d.getString("price") ?: "", d.getString("ownerUid") ?: "", d.getString("ownerName") ?: "", (d.getLong("playersNeeded") ?: 1L).toInt(), (d.getLong("confirmedCount") ?: 0L).toInt(), d.getDouble("lat"), d.getDouble("lon"))
             }
         }
         regs += db.collection("users").whereEqualTo("role", "Jugador").addSnapshotListener { snap, e ->
@@ -164,9 +181,17 @@ private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -
         }
         onDispose { regs.forEach { it.remove() } }
     }
+    DisposableEffect(matches.map { it.id }.joinToString("|")) {
+        val rosterRegs = matches.map { match ->
+            db.collection("matches").document(match.id).collection("players").addSnapshotListener { snapshot, _ ->
+                rosterPlayersByMatch = rosterPlayersByMatch + (match.id to snapshot?.documents.orEmpty().map { it.id }.toSet())
+            }
+        }
+        onDispose { rosterRegs.forEach { it.remove() }; rosterPlayersByMatch = emptyMap() }
+    }
     val tabs = when (role) { "Jugador" -> listOf("Mapa", "Partidos", "Invitaciones", "Perfil"); "Capitán" -> listOf("Partidos", "Mapa", "Jugadores", "Solicitudes", "Publicar", "Perfil"); else -> listOf("Partidos", "Mapa", "Jugadores", "Publicar", "Solicitudes", "Perfil") }
     Scaffold(containerColor = Canvas, topBar = { CenterAlignedTopAppBar(title = { Text("⚽ FÚTBOL CERCA", fontWeight = FontWeight.Black, color = Color.White) }, colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Green)) }, bottomBar = { NavigationBar(containerColor = Color.White) { tabs.forEach { t -> NavigationBarItem(selected = tab == t, onClick = { tab = t }, icon = { Icon(when(t) { "Mapa" -> Icons.Default.Map; "Perfil" -> Icons.Default.Person; "Jugadores" -> Icons.Default.Groups; "Solicitudes" -> Icons.Default.MarkEmailUnread; "Publicar" -> Icons.Default.AddCircle; else -> Icons.Default.SportsSoccer }, null) }, label = { Text(t, fontSize = 10.sp) }) } } }) { padding ->
-        LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        LazyColumn(Modifier.fillMaxSize().padding(padding).imePadding(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item { Column { Text("Hola, ${(profile["displayName"] as? String ?: "") .substringBefore(" ")} 👋", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold); Text("${if (role == "Cancha") "Administrá tus encuentros" else "El fútbol está más cerca"}", color = Color.Gray) } }
             when (tab) {
                 "Mapa" -> {
@@ -179,7 +204,8 @@ private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -
                 "Publicar" -> item { PublishForm(uid, profile, showMessage) }
                 "Jugadores" -> {
                     item { Text("Elegí jugadores para invitar", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
-                    items(players) { p -> PlayerInviteCard(p, matches.filter { it.ownerUid == uid }, showMessage) }
+                    items(players.filter { it.uid !in busyPlayerIds }) { p -> PlayerInviteCard(p, matches.filter { it.ownerUid == uid }, showMessage) }
+                    if (players.none { it.uid !in busyPlayerIds }) item { Text("No hay jugadores disponibles sin confirmar en otros partidos.", color = Color.Gray) }
                 }
                 "Solicitudes" -> {
                     val ownMatches = matches.filter { it.ownerUid == uid }
@@ -275,7 +301,10 @@ private fun requestCurrentLocation(context: Context, onResult: (Location?) -> Un
     } catch (_: SecurityException) { onResult(null) }
 }
 private fun saveLocation(uid: String, loc: Location, show: (String, Boolean) -> Unit) {
-    db.collection("users").document(uid).set(mapOf("lat" to loc.latitude, "lon" to loc.longitude, "locationUpdatedAt" to Timestamp.now()), com.google.firebase.firestore.SetOptions.merge())
+    // Se guarda una ubicación aproximada (2 decimales, alrededor de 1 km), no la coordenada exacta.
+    val approximateLat = round(loc.latitude * 100.0) / 100.0
+    val approximateLon = round(loc.longitude * 100.0) / 100.0
+    db.collection("users").document(uid).set(mapOf("lat" to approximateLat, "lon" to approximateLon, "locationUpdatedAt" to Timestamp.now()), com.google.firebase.firestore.SetOptions.merge())
         .addOnSuccessListener { show("Ubicación actualizada. Ya podés aparecer en el mapa.", true) }
         .addOnFailureListener { show("No se pudo guardar la ubicación: ${it.localizedMessage}", false) }
 }
@@ -299,17 +328,17 @@ private fun PublishForm(uid: String, profile: Map<String, Any>, showMessage: (St
     Card(shape = RoundedCornerShape(22.dp)) { Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Crear partido", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         OutlinedTextField(title, { title = it }, label = { Text("Título de la convocatoria") }, modifier = Modifier.fillMaxWidth())
-        Text("Modalidad"); Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) { listOf("Masculino", "Femenino", "Mixto").forEach { FilterChip(mode == it, { mode = it }, label = { Text(it, fontSize = 11.sp) }) } }
-        Text("Formato"); Row { listOf("Fútbol 5", "Fútbol 7").forEach { FilterChip(format == it, { format = it }, label = { Text(it) }); Spacer(Modifier.width(6.dp)) } }
+        Text("Modalidad"); Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) { listOf("Masculino", "Femenino", "Mixto").forEach { FilterChip(mode == it, { mode = it }, label = { Text(it, fontSize = 11.sp) }) } }
+        Text("Formato"); Row(Modifier.horizontalScroll(rememberScrollState())) { listOf("Fútbol 5", "Fútbol 7").forEach { FilterChip(format == it, { format = it }, label = { Text(it) }); Spacer(Modifier.width(6.dp)) } }
         OutlinedButton(onClick = { pickDateTime() }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.CalendarMonth, null); Spacer(Modifier.width(8.dp)); Text(if (date.isBlank()) "Elegir fecha y hora" else date) }
         OutlinedTextField(venue, { venue = it }, label = { Text("Nombre de cancha / lugar") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(zone, { zone = it }, label = { Text("Barrio o zona") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(price, { price = it }, label = { Text("Costo por jugador (opcional)") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(needed, { needed = it.filter(Char::isDigit).take(2) }, label = { Text("Jugadores que faltan") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(needed, { needed = it.filter(Char::isDigit).take(2) }, label = { Text("Cupos totales del partido") }, modifier = Modifier.fillMaxWidth())
         Button(enabled = !saving, onClick = {
             if (title.isBlank() || date.isBlank() || venue.isBlank() || zone.isBlank()) { showMessage("Completá título, fecha, cancha y zona."); return@Button }
             saving = true
-            val data = hashMapOf<String, Any>("title" to title.trim(), "mode" to mode, "format" to format, "dateLabel" to date, "dateTime" to date, "eventAt" to Timestamp(cal.time), "venue" to venue.trim(), "zone" to zone.trim(), "price" to price.trim(), "playersNeeded" to (needed.toIntOrNull() ?: 1), "ownerUid" to uid, "ownerName" to (profile["displayName"] as? String ?: "Organizador"), "status" to "open", "createdAt" to Timestamp.now())
+            val data = hashMapOf<String, Any>("title" to title.trim(), "mode" to mode, "format" to format, "dateLabel" to date, "dateTime" to date, "eventAt" to Timestamp(cal.time), "venue" to venue.trim(), "zone" to zone.trim(), "price" to price.trim(), "playersNeeded" to (needed.toIntOrNull() ?: 1).coerceAtLeast(1), "confirmedCount" to 0, "ownerUid" to uid, "ownerName" to (profile["displayName"] as? String ?: "Organizador"), "status" to "open", "createdAt" to Timestamp.now())
             (profile["lat"] as? Double)?.let { data["lat"] = it }; (profile["lon"] as? Double)?.let { data["lon"] = it }
             db.collection("matches").add(data).addOnSuccessListener { saving = false; title = ""; showMessage("¡Partido publicado! Ya está visible para los demás.") }.addOnFailureListener { saving = false; showMessage("No se pudo publicar. Revisá las reglas de Firestore: ${it.localizedMessage}") }
         }, modifier = Modifier.fillMaxWidth()) { Text(if (saving) "Publicando…" else "Publicar partido") }
@@ -319,18 +348,69 @@ private fun PublishForm(uid: String, profile: Map<String, Any>, showMessage: (St
 @Composable
 private fun MatchCard(m: MatchData, canApply: Boolean, uid: String, playerName: String, showMessage: (String) -> Unit) {
     var applied by remember(m.id) { mutableStateOf(false) }
-    LaunchedEffect(m.id, uid) { db.collection("matches").document(m.id).collection("applications").document(uid).get().addOnSuccessListener { applied = it.exists() } }
-    Card(shape = RoundedCornerShape(20.dp)) { Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) { Surface(color = Color(0xFFE7F4DD), shape = CircleShape) { Text("${m.playersNeeded} VACANTES", Modifier.padding(8.dp), color = Green, fontSize = 10.sp, fontWeight = FontWeight.Bold) }; Spacer(Modifier.weight(1f)); Text(m.format, color = Green, fontWeight = FontWeight.Bold) }
-        Text(m.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold); Text("${m.mode} · ${m.dateLabel}"); Text("${m.venue} · ${m.zone}"); Text("Organiza: ${m.ownerName}"); Text("Costo: ${m.price.ifBlank { "A confirmar" }}")
-        if (canApply) Button(enabled = !applied, onClick = { val values = mapOf("uid" to uid, "playerName" to playerName, "status" to "pending", "createdAt" to Timestamp.now()); db.collection("matches").document(m.id).collection("applications").document(uid).set(values).addOnSuccessListener { applied = true; showMessage("Postulación enviada.") }.addOnFailureListener { showMessage("No se pudo postular: ${it.localizedMessage}") } }, modifier = Modifier.fillMaxWidth()) { Text(if (applied) "Postulación enviada" else "Postularme") }
+    var alreadyConfirmed by remember(m.id) { mutableStateOf(false) }
+    var roster by remember(m.id) { mutableStateOf(listOf<String>()) }
+    val remaining = (m.playersNeeded - m.confirmedCount).coerceAtLeast(0)
+    DisposableEffect(m.id, uid) {
+        val matchRef = db.collection("matches").document(m.id)
+        val appReg = matchRef.collection("applications").document(uid).addSnapshotListener { snap, _ -> applied = snap?.getString("status") in listOf("pending", "accepted") }
+        val playerReg = matchRef.collection("players").document(uid).addSnapshotListener { snap, _ -> alreadyConfirmed = snap?.exists() == true }
+        val rosterReg = matchRef.collection("players").addSnapshotListener { snap, _ ->
+            roster = snap?.documents.orEmpty().mapNotNull { it.getString("playerName") }
+        }
+        onDispose { appReg.remove(); playerReg.remove(); rosterReg.remove() }
+    }
+    Card(shape = RoundedCornerShape(20.dp)) { Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Surface(color = if (remaining == 0) Color(0xFFFFE4E4) else Color(0xFFE7F4DD), shape = CircleShape) {
+                Text(if (remaining == 0) "COMPLETO" else "$remaining VACANTES", Modifier.padding(8.dp), color = if (remaining == 0) Color(0xFF9D2020) else Green, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.weight(1f)); Text(m.format, color = Green, fontWeight = FontWeight.Bold)
+        }
+        Text(m.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text("${m.mode} · ${m.dateLabel}"); Text("${m.venue} · ${m.zone}"); Text("Organiza: ${m.ownerName}"); Text("Costo: ${m.price.ifBlank { "A confirmar" }}")
+        Text("Plantel confirmado: ${m.confirmedCount}/${m.playersNeeded}", fontWeight = FontWeight.SemiBold, color = Green)
+        if (roster.isNotEmpty()) Text("Jugadores: ${roster.joinToString(", ")}", fontSize = 12.sp, color = Color.DarkGray)
+        if (canApply) Button(enabled = !applied && !alreadyConfirmed && remaining > 0, onClick = {
+            val values = mapOf("uid" to uid, "playerName" to playerName, "status" to "pending", "createdAt" to Timestamp.now())
+            db.collection("matches").document(m.id).collection("applications").document(uid).set(values)
+                .addOnSuccessListener { applied = true; showMessage("Postulación enviada.") }
+                .addOnFailureListener { showMessage("No se pudo postular: ${it.localizedMessage}") }
+        }, modifier = Modifier.fillMaxWidth()) {
+            Text(when { alreadyConfirmed -> "Ya estás confirmado"; remaining == 0 -> "Partido completo"; applied -> "Postulación enviada"; else -> "Postularme" })
+        }
     } }
+}
+
+private fun confirmPlayer(matchId: String, playerUid: String, source: String, showMessage: (String) -> Unit) {
+    val matchRef = db.collection("matches").document(matchId)
+    val requestRef = matchRef.collection(source).document(playerUid)
+    val playerRef = matchRef.collection("players").document(playerUid)
+    db.runTransaction { transaction ->
+        val match = transaction.get(matchRef)
+        val request = transaction.get(requestRef)
+        val existingPlayer = transaction.get(playerRef)
+        if (!match.exists()) throw IllegalStateException("El partido ya no existe.")
+        if (!request.exists()) throw IllegalStateException("La solicitud ya no está disponible.")
+        if (existingPlayer.exists()) throw IllegalStateException("Este jugador ya está confirmado.")
+        if (request.getString("status") != "pending") throw IllegalStateException("Esta solicitud ya fue procesada.")
+        val capacity = (match.getLong("playersNeeded") ?: 1L).toInt()
+        val confirmed = (match.getLong("confirmedCount") ?: 0L).toInt()
+        if (confirmed >= capacity) throw IllegalStateException("El partido ya está completo.")
+        val name = request.getString("playerName") ?: request.getString("displayName") ?: "Jugador"
+        val rosterData = hashMapOf<String, Any>("uid" to playerUid, "playerName" to name, "joinedAt" to Timestamp.now(), "source" to source)
+        transaction.update(requestRef, "status", "accepted")
+        transaction.set(playerRef, rosterData)
+        transaction.update(matchRef, "confirmedCount", confirmed + 1)
+        null
+    }.addOnSuccessListener { showMessage("Jugador confirmado y agregado al plantel.") }
+        .addOnFailureListener { showMessage(it.localizedMessage ?: "No se pudo confirmar al jugador.") }
 }
 
 @Composable
 private fun PlayerInviteCard(player: PlayerData, ownMatches: List<MatchData>, showMessage: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
-    Card { Column(Modifier.fillMaxWidth().padding(12.dp)) { Text(player.name, fontWeight = FontWeight.Bold); Text("${player.zone} · ${player.positions}"); Text("Disponible: ${player.availability}"); TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Cerrar" else "Invitar a un partido") }; if (expanded) ownMatches.forEach { m -> TextButton(onClick = { val invite = mapOf("playerUid" to player.uid, "playerName" to player.name, "matchId" to m.id, "matchTitle" to m.title, "ownerUid" to m.ownerUid, "status" to "pending", "createdAt" to Timestamp.now()); db.collection("matches").document(m.id).collection("invitations").document(player.uid).set(invite).addOnSuccessListener { showMessage("Invitación enviada a ${player.name}.") }.addOnFailureListener { showMessage("No se pudo invitar: ${it.localizedMessage}") } }) { Text("${m.title} · Invitar") } } } }
+    Card { Column(Modifier.fillMaxWidth().padding(12.dp)) { Text(player.name, fontWeight = FontWeight.Bold); Text("${player.zone} · ${player.positions}"); Text("Disponible: ${player.availability}"); TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Cerrar" else "Invitar a un partido") }; if (expanded) ownMatches.filter { it.confirmedCount < it.playersNeeded }.forEach { m -> TextButton(onClick = { val invite = mapOf("playerUid" to player.uid, "playerName" to player.name, "matchId" to m.id, "matchTitle" to m.title, "ownerUid" to m.ownerUid, "status" to "pending", "createdAt" to Timestamp.now()); db.collection("matches").document(m.id).collection("invitations").document(player.uid).set(invite).addOnSuccessListener { showMessage("Invitación enviada a ${player.name}.") }.addOnFailureListener { showMessage("No se pudo invitar: ${it.localizedMessage}") } }) { Text("${m.title} · Invitar") } } } }
 }
 
 @Composable
@@ -353,19 +433,16 @@ private fun Applications(matchId: String, showMessage: (String) -> Unit) {
                 Column(Modifier.padding(12.dp)) {
                     Text(application["playerName"] as? String ?: "Jugador", fontWeight = FontWeight.Bold)
                     Text("Estado: ${application["status"] ?: "pending"}")
-                    Row {
-                        Button(onClick = {
-                            db.collection("matches").document(matchId).collection("applications").document(playerUid)
-                                .update("status", "accepted")
-                                .addOnSuccessListener { showMessage("Jugador aceptado.") }
-                                .addOnFailureListener { showMessage(it.localizedMessage ?: "Error al aceptar") }
-                        }) { Text("Aceptar") }
-                        TextButton(onClick = {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Button(enabled = (application["status"] as? String) == "pending", onClick = {
+                            confirmPlayer(matchId, playerUid, "applications", showMessage)
+                        }, modifier = Modifier.fillMaxWidth()) { Text("Aceptar y sumar al plantel") }
+                        TextButton(enabled = (application["status"] as? String) == "pending", onClick = {
                             db.collection("matches").document(matchId).collection("applications").document(playerUid)
                                 .update("status", "rejected")
                                 .addOnSuccessListener { showMessage("Solicitud rechazada.") }
                                 .addOnFailureListener { showMessage(it.localizedMessage ?: "Error al rechazar") }
-                        }) { Text("Rechazar") }
+                        }, modifier = Modifier.fillMaxWidth()) { Text("Rechazar") }
                     }
                 }
             }
@@ -396,10 +473,7 @@ private fun PlayerInvitations(matches: List<MatchData>, uid: String, showMessage
                     Text("${match.dateLabel} · ${match.venue}")
                     Row {
                         Button(onClick = {
-                            db.collection("matches").document(match.id).collection("invitations").document(uid)
-                                .update("status", "accepted")
-                                .addOnSuccessListener { showMessage("Invitación aceptada.") }
-                                .addOnFailureListener { showMessage(it.localizedMessage ?: "No se pudo aceptar") }
+                            confirmPlayer(match.id, uid, "invitations", showMessage)
                         }) { Text("Aceptar") }
                         TextButton(onClick = {
                             db.collection("matches").document(match.id).collection("invitations").document(uid)
