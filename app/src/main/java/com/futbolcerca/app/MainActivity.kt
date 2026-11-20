@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package com.futbolcerca.app
 
 import android.Manifest
@@ -14,10 +16,14 @@ import android.location.LocationManager
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -32,6 +38,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -56,6 +65,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
@@ -85,6 +95,7 @@ private val Canvas = Color(0xFFF3F6F1)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(android.graphics.Color.rgb(18, 59, 45)))
         Configuration.getInstance().userAgentValue = packageName
         setContent { MaterialTheme(colorScheme = lightColorScheme(primary = Green, secondary = Lime, background = Canvas)) { Root() } }
     }
@@ -123,10 +134,10 @@ private fun AuthScreen(setLoading: (Boolean) -> Unit, showMessage: (String) -> U
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var role by remember { mutableStateOf("Jugador") }
-    Column(Modifier.fillMaxSize().background(Canvas).padding(24.dp), verticalArrangement = Arrangement.Center) {
+    Column(Modifier.fillMaxSize().background(Canvas).systemBarsPadding().imePadding().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.Center) {
         Surface(color = Green, shape = RoundedCornerShape(24.dp), modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Default.SportsSoccer, null, tint = Lime, modifier = Modifier.size(48.dp))
+                Icon(painterResource(R.drawable.ic_cancha), null, tint = Color.Unspecified, modifier = Modifier.size(56.dp))
                 Text("FÚTBOL CERCA", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Black)
                 Text("Encontrá equipo. Jugá cerca.", color = Color.White.copy(alpha = .8f))
             }
@@ -136,7 +147,7 @@ private fun AuthScreen(setLoading: (Boolean) -> Unit, showMessage: (String) -> U
         if (registering) {
             OutlinedTextField(name, { name = it }, label = { Text("Nombre completo") }, modifier = Modifier.fillMaxWidth())
             Text("¿Cómo vas a usar la app?", fontWeight = FontWeight.SemiBold)
-            listOf("Jugador", "Capitán", "Cancha").forEach { r -> Row(verticalAlignment = Alignment.CenterVertically) { RadioButton(role == r, { role = r }); Text(if (r == "Cancha") "Dueño de cancha" else r) } }
+            listOf("Jugador", "Capitán", "Cancha").forEach { r -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { RadioButton(role == r, { role = r }); Text(if (r == "Cancha") "Dueño de cancha" else r, Modifier.weight(1f)) } }
         }
         OutlinedTextField(email, { email = it }, label = { Text("Correo electrónico") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(password, { password = it }, label = { Text("Contraseña · mínimo 6 caracteres") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
@@ -155,7 +166,7 @@ private fun AuthScreen(setLoading: (Boolean) -> Unit, showMessage: (String) -> U
             }.addOnFailureListener { setLoading(false); showMessage(it.localizedMessage ?: "Error de acceso") }
         }, modifier = Modifier.fillMaxWidth()) { Text(if (registering) "Crear mi cuenta" else "Ingresar") }
         TextButton(onClick = { registering = !registering }) { Text(if (registering) "Ya tengo cuenta · Iniciar sesión" else "Crear cuenta nueva") }
-        Text("7 días de prueba · Soporte y licencias CodeMarket", color = Color.Gray, fontSize = 12.sp)
+        Text("7 días de prueba · Soporte y licencias CodeMarket", color = Color.Gray, fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center, modifier = Modifier.fillMaxWidth())
     }
 }
 
@@ -207,8 +218,25 @@ private suspend fun geocodeZone(vararg queries: String): GeoZone? = withContext(
             }
         } catch (_: Exception) { }
     }
-    null
+    // Respaldo: si el servicio de mapas no responde, se reconocen los departamentos del Gran Mendoza.
+    val text = java.text.Normalizer.normalize(queries.joinToString(" ").lowercase(Locale.ROOT), java.text.Normalizer.Form.NFD).replace(Regex("\\p{M}+"), "")
+    FALLBACK_ZONES.entries.firstOrNull { text.contains(it.key) }?.value
 }
+
+private val FALLBACK_ZONES: Map<String, GeoZone> = linkedMapOf(
+    "chacras de coria" to GeoZone(-33.0063, -68.8790, 1500.0),
+    "dorrego" to GeoZone(-32.9172, -68.8031, 1200.0),
+    "godoy cruz" to GeoZone(-32.9269, -68.8419, 2500.0),
+    "guaymallen" to GeoZone(-32.8997, -68.7747, 2500.0),
+    "las heras" to GeoZone(-32.8512, -68.8283, 2500.0),
+    "lujan" to GeoZone(-33.0386, -68.8740, 2500.0),
+    "maipu" to GeoZone(-32.9772, -68.7897, 2500.0),
+    "lavalle" to GeoZone(-32.7216, -68.6000, 2500.0),
+    "san martin" to GeoZone(-33.0812, -68.4700, 2500.0),
+    "capital" to GeoZone(-32.8895, -68.8458, 2000.0),
+    "ciudad de mendoza" to GeoZone(-32.8895, -68.8458, 2000.0),
+    "mendoza" to GeoZone(-32.8895, -68.8458, 2500.0)
+)
 
 /** Agrupa personas/partidos que caen en la misma zona. Cada grupo se dibuja como un círculo con su cantidad. */
 private fun buildZones(items: List<MapItem>): List<ZoneCluster> {
@@ -257,28 +285,73 @@ private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -
     var players by remember { mutableStateOf(listOf<PlayerData>()) }
     var selectedMatchId by remember { mutableStateOf<String?>(null) }
     var selectedZone by remember { mutableStateOf<ZoneCluster?>(null) }
+    var syncError by remember { mutableStateOf<String?>(null) }
+    val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    // Autoreparación: si hay zona escrita pero nunca se convirtió a coordenadas, se calcula ahora.
+    LaunchedEffect(uid, profile["zone"]) {
+        val z = (profile["zone"] as? String).orEmpty().trim()
+        if (z.isNotBlank() && profile["zoneLat"] == null) {
+            val g = geocodeZone(z)
+            if (g != null) {
+                db.collection("users").document(uid).set(mapOf("zoneLat" to g.lat, "zoneLon" to g.lon, "zoneRadius" to g.radius), SetOptions.merge())
+                profile = profile + mapOf("zoneLat" to g.lat, "zoneLon" to g.lon, "zoneRadius" to g.radius)
+            }
+        }
+    }
+    val healedMatches = remember { mutableSetOf<String>() }
+    LaunchedEffect(matches) {
+        matches.filter { it.ownerUid == uid && it.zoneLat == null && it.zone.isNotBlank() && healedMatches.add(it.id) }.forEach { m ->
+            val g = geocodeZone("${m.venue}, ${m.zone}", m.zone)
+            if (g != null) db.collection("matches").document(m.id).set(mapOf("zoneLat" to g.lat, "zoneLon" to g.lon, "zoneRadius" to g.radius), SetOptions.merge())
+        }
+    }
     DisposableEffect(uid) {
         val regs = mutableListOf<ListenerRegistration>()
         regs += db.collection("matches").whereIn("status", listOf("open", "full")).addSnapshotListener { snap, e ->
-            if (e != null) showMessage("Error al cargar partidos: ${e.localizedMessage}") else matches = snap?.documents.orEmpty().map { d ->
+            if (e != null) syncError = "Partidos: ${e.localizedMessage}" else { syncError = null; matches = snap?.documents.orEmpty().map { d ->
                 MatchData(d.id, d.getString("title") ?: "Partido", d.getString("mode") ?: "Mixto", d.getString("format") ?: "Fútbol 5", d.getString("dateLabel") ?: d.getString("dateTime") ?: "", d.getString("venue") ?: "", d.getString("zone") ?: "", d.getString("price") ?: "", d.getString("ownerUid") ?: "", d.getString("ownerName") ?: "", (d.getLong("playersNeeded") ?: 1L).toInt(), d.getString("status") ?: "open", d.getDouble("lat"), d.getDouble("lon"), d.getDouble("zoneLat"), d.getDouble("zoneLon"), d.getDouble("zoneRadius"))
-            }
+            } }
         }
         regs += db.collection("users").whereEqualTo("role", "Jugador").addSnapshotListener { snap, e ->
-            if (e != null) showMessage("Error al buscar jugadores: ${e.localizedMessage}") else players = snap?.documents.orEmpty().mapNotNull { d ->
+            if (e != null) syncError = "Jugadores: ${e.localizedMessage}" else players = snap?.documents.orEmpty().mapNotNull { d ->
                 if (d.id == uid) null else PlayerData(d.id, d.getString("displayName") ?: "Jugador", d.getString("zone") ?: "Zona no indicada", d.getString("positions") ?: "Sin posición", d.getString("availability") ?: "Sin disponibilidad", d.getDouble("lat"), d.getDouble("lon"), d.getDouble("zoneLat"), d.getDouble("zoneLon"), d.getDouble("zoneRadius"))
             }
         }
         onDispose { regs.forEach { it.remove() } }
     }
     val tabs = when (role) { "Jugador" -> listOf("Mapa", "Partidos", "Invitaciones", "Perfil"); "Capitán" -> listOf("Partidos", "Mapa", "Jugadores", "Solicitudes", "Publicar", "Perfil"); else -> listOf("Partidos", "Mapa", "Jugadores", "Publicar", "Solicitudes", "Perfil") }
-    Scaffold(containerColor = Canvas, topBar = { CenterAlignedTopAppBar(title = { Text("⚽ FÚTBOL CERCA", fontWeight = FontWeight.Black, color = Color.White) }, colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Green)) }, bottomBar = { NavigationBar(containerColor = Color.White) { tabs.forEach { t -> NavigationBarItem(selected = tab == t, onClick = { tab = t }, icon = { Icon(when(t) { "Mapa" -> Icons.Default.Map; "Perfil" -> Icons.Default.Person; "Jugadores" -> Icons.Default.Groups; "Solicitudes" -> Icons.Default.MarkEmailUnread; "Publicar" -> Icons.Default.AddCircle; else -> Icons.Default.SportsSoccer }, null) }, label = { Text(t, fontSize = 10.sp) }) } } }) { padding ->
+    fun tabLabel(t: String) = when (t) { "Solicitudes" -> "Pedidos"; "Publicar" -> "Crear"; "Invitaciones" -> "Invitac."; else -> t }
+    Scaffold(
+        modifier = Modifier.imePadding(),
+        containerColor = Canvas,
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = { Row(verticalAlignment = Alignment.CenterVertically) { Icon(painterResource(R.drawable.ic_cancha), null, tint = Color.Unspecified, modifier = Modifier.size(28.dp)); Spacer(Modifier.width(8.dp)); Text("FÚTBOL CERCA", fontWeight = FontWeight.Black, color = Color.White, maxLines = 1) } },
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Green)
+            )
+        },
+        bottomBar = {
+            if (!imeVisible) NavigationBar(containerColor = Color.White) {
+                tabs.forEach { t ->
+                    NavigationBarItem(selected = tab == t, onClick = { tab = t },
+                        icon = { Icon(when (t) { "Mapa" -> Icons.Default.Map; "Perfil" -> Icons.Default.Person; "Jugadores" -> Icons.Default.Groups; "Solicitudes" -> Icons.Default.MarkEmailUnread; "Publicar" -> Icons.Default.AddCircle; else -> Icons.Default.SportsSoccer }, null) },
+                        label = { Text(tabLabel(t), fontSize = 10.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Clip) })
+                }
+            }
+        }
+    ) { padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item { Column { Text("Hola, ${(profile["displayName"] as? String ?: "") .substringBefore(" ")} 👋", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold); Text("${if (role == "Cancha") "Administrá tus encuentros" else "El fútbol está más cerca"}", color = Color.Gray) } }
+            syncError?.let { err -> item { Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFFFE0DD))) { Column(Modifier.fillMaxWidth().padding(12.dp)) { Text("No se pueden leer los datos", fontWeight = FontWeight.Bold, color = Color(0xFF8A1C12)); Text(err, fontSize = 12.sp); Text("Si dice PERMISSION_DENIED: las reglas publicadas en Firebase no son las de firestore.rules. Publicalas en Firebase Console → Firestore Database → Reglas.", fontSize = 12.sp, color = Color.DarkGray) } } } }
+            item { Column { Text("Hola, ${(profile["displayName"] as? String ?: "") .substringBefore(" ")} 👋", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis); Text("${if (role == "Cancha") "Administrá tus encuentros" else "El fútbol está más cerca"}", color = Color.Gray) } }
             when (tab) {
                 "Mapa" -> {
                     item { Text("Mapa en vivo", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
                     item { InAppMap(players, matches) { selectedZone = it } }
+                    item {
+                        val pz = players.count { (it.zoneLat ?: it.lat) != null }; val mz = matches.count { (it.zoneLat ?: it.lat) != null }
+                        Text("Jugadores: ${players.size} (${pz} con zona) · Partidos: ${matches.size} (${mz} con zona)", fontSize = 12.sp, color = Color.DarkGray)
+                        if (players.size > pz || matches.size > mz) Text("Los que no tienen zona no se dibujan: cada usuario debe cargar su barrio o zona en Perfil (o Publicar).", fontSize = 12.sp, color = Color.Gray)
+                    }
                     selectedZone?.let { z -> item { ZoneDetail(z) { selectedZone = null } } }
                     item { Text("Cada círculo es una zona. El número indica cuántos jugadores y partidos hay ahí; tocá el círculo para ver quiénes son. Nunca se muestra una dirección exacta.", color = Color.Gray, fontSize = 12.sp) }
                 }
@@ -293,7 +366,7 @@ private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -
                     val ownMatches = matches.filter { it.ownerUid == uid }
                     item { Text("Postulaciones recibidas", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
                     if (ownMatches.isEmpty()) item { EmptyState("No tenés partidos publicados", "Publicá un partido para recibir postulaciones e invitar jugadores.") }
-                    items(ownMatches) { m -> Card { Column(Modifier.fillMaxWidth().padding(12.dp)) { Text(m.title, fontWeight = FontWeight.Bold); Text(if (m.status == "full") "COMPLETO" else "${m.playersNeeded} vacantes", color = Color.Gray); Button(onClick = { selectedMatchId = if (selectedMatchId == m.id) null else m.id }) { Text(if (selectedMatchId == m.id) "Ocultar" else "Ver solicitudes y confirmados") } } } }
+                    items(ownMatches) { m -> Card { Column(Modifier.fillMaxWidth().padding(12.dp)) { Text(m.title, fontWeight = FontWeight.Bold); Text(if (m.status == "full") "COMPLETO" else "${m.playersNeeded} vacantes", color = Color.Gray); Button(onClick = { selectedMatchId = if (selectedMatchId == m.id) null else m.id }, modifier = Modifier.fillMaxWidth()) { Text(if (selectedMatchId == m.id) "Ocultar" else "Ver pedidos y confirmados") } } } }
                     ownMatches.firstOrNull { it.id == selectedMatchId }?.let { m -> item(key = "panel-${m.id}") { MatchManagement(m, showMessage) } }
                 }
                 else -> {
@@ -324,8 +397,8 @@ private fun InAppMap(players: List<PlayerData>, matches: List<MatchData>, onSele
         }
         buildZones(items)
     }
-    AndroidView(modifier = Modifier.fillMaxWidth().height(420.dp), factory = {
-        MapView(it).apply { setTileSource(TileSourceFactory.MAPNIK); setMultiTouchControls(true); controller.setZoom(12.5); controller.setCenter(GeoPoint(-32.8895, -68.8458)) }
+    AndroidView(modifier = Modifier.fillMaxWidth().height(380.dp), factory = {
+        MapView(it).apply { setOnTouchListener { v, _ -> v.parent?.requestDisallowInterceptTouchEvent(true); false }; setTileSource(TileSourceFactory.MAPNIK); setMultiTouchControls(true); controller.setZoom(12.5); controller.setCenter(GeoPoint(-32.8895, -68.8458)) }
     }, update = { map ->
         map.overlays.clear()
         zones.forEach { z ->
@@ -343,6 +416,14 @@ private fun InAppMap(players: List<PlayerData>, matches: List<MatchData>, onSele
             badge.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
             badge.setOnMarkerClickListener { _, _ -> onSelect(z); true }
             map.overlays.add(badge)
+        }
+        if (zones.isNotEmpty() && map.tag != zones) {
+            map.tag = zones
+            val pts = zones.flatMap { z ->
+                val dLat = z.radius / 111320.0; val dLon = z.radius / (111320.0 * cos(Math.toRadians(z.lat)))
+                listOf(GeoPoint(z.lat + dLat, z.lon), GeoPoint(z.lat - dLat, z.lon), GeoPoint(z.lat, z.lon + dLon), GeoPoint(z.lat, z.lon - dLon))
+            }
+            map.post { try { map.zoomToBoundingBox(BoundingBox.fromGeoPoints(pts), false, 60) } catch (_: Exception) { } }
         }
         map.invalidate()
     })
@@ -387,12 +468,12 @@ private fun ProfileEditor(uid: String, data: Map<String, Any>, onSaved: (Map<Str
         Text("Mi perfil deportivo", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         OutlinedTextField(name, { name = it }, label = { Text("Nombre") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(age, { age = it.filter(Char::isDigit).take(2) }, label = { Text("Edad") }, modifier = Modifier.fillMaxWidth())
-        Text("Género"); Row { listOf("Masculino", "Femenino").forEach { FilterChip(gender == it, { gender = it }, label = { Text(it) }); Spacer(Modifier.width(6.dp)) } }
+        Text("Género"); FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) { listOf("Masculino", "Femenino").forEach { FilterChip(gender == it, { gender = it }, label = { Text(it) }) } }
         OutlinedTextField(positions, { positions = it }, label = { Text("Posiciones") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(skills, { skills = it }, label = { Text("Habilidades / experiencia") }, modifier = Modifier.fillMaxWidth(), minLines = 2)
-        Text("Disponibilidad"); listOf("Ahora mismo", "Esta noche", "Mañana", "Fines de semana").forEach { Row(verticalAlignment = Alignment.CenterVertically) { RadioButton(availability == it, { availability = it }); Text(it) } }
+        Text("Disponibilidad"); listOf("Ahora mismo", "Esta noche", "Mañana", "Fines de semana").forEach { Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { RadioButton(availability == it, { availability = it }); Text(it, Modifier.weight(1f)) } }
         OutlinedTextField(zone, { zone = it }, label = { Text("Barrio, zona o dirección (se muestra como zona)") }, modifier = Modifier.fillMaxWidth())
-        OutlinedButton(onClick = { locationPermission.launch(Manifest.permission.ACCESS_COARSE_LOCATION) }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.MyLocation, null); Spacer(Modifier.width(8.dp)); Text("Actualizar mi ubicación en el mapa") }
+        OutlinedButton(onClick = { locationPermission.launch(Manifest.permission.ACCESS_COARSE_LOCATION) }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.MyLocation, null); Spacer(Modifier.width(8.dp)); Text("Usar mi ubicación actual", Modifier.weight(1f, fill = false)) }
         Button(enabled = !saving, onClick = {
             if (name.isBlank()) { showMessage("Ingresá tu nombre."); return@Button }
             saving = true
@@ -464,8 +545,8 @@ private fun PublishForm(uid: String, profile: Map<String, Any>, showMessage: (St
     Card(shape = RoundedCornerShape(22.dp)) { Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Crear partido", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         OutlinedTextField(title, { title = it }, label = { Text("Título de la convocatoria") }, modifier = Modifier.fillMaxWidth())
-        Text("Modalidad"); Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) { listOf("Masculino", "Femenino", "Mixto").forEach { FilterChip(mode == it, { mode = it }, label = { Text(it, fontSize = 11.sp) }) } }
-        Text("Formato"); Row { listOf("Fútbol 5", "Fútbol 7").forEach { FilterChip(format == it, { format = it }, label = { Text(it) }); Spacer(Modifier.width(6.dp)) } }
+        Text("Modalidad"); FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) { listOf("Masculino", "Femenino", "Mixto").forEach { FilterChip(mode == it, { mode = it }, label = { Text(it) }) } }
+        Text("Formato"); FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) { listOf("Fútbol 5", "Fútbol 7").forEach { FilterChip(format == it, { format = it }, label = { Text(it) }) } }
         OutlinedButton(onClick = { pickDateTime() }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.CalendarMonth, null); Spacer(Modifier.width(8.dp)); Text(if (date.isBlank()) "Elegir fecha y hora" else date) }
         OutlinedTextField(venue, { venue = it }, label = { Text("Nombre de cancha / lugar") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(zone, { zone = it }, label = { Text("Barrio, zona o dirección") }, modifier = Modifier.fillMaxWidth())
@@ -500,7 +581,7 @@ private fun MatchCard(m: MatchData, canApply: Boolean, uid: String, playerName: 
     }
     val full = m.status == "full"
     Card(shape = RoundedCornerShape(20.dp)) { Column(Modifier.fillMaxWidth().padding(15.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) { Surface(color = if (full) Color(0xFFFFE0DD) else Color(0xFFE7F4DD), shape = CircleShape) { Text(if (full) "COMPLETO" else "${m.playersNeeded} VACANTES", Modifier.padding(8.dp), color = Green, fontSize = 10.sp, fontWeight = FontWeight.Bold) }; Spacer(Modifier.weight(1f)); Text(m.format, color = Green, fontWeight = FontWeight.Bold) }
+        Row(verticalAlignment = Alignment.CenterVertically) { Surface(color = if (full) Color(0xFFFFE0DD) else Color(0xFFE7F4DD), shape = CircleShape) { Text(if (full) "COMPLETO" else "${m.playersNeeded} VACANTES", Modifier.padding(8.dp), color = Green, fontSize = 10.sp, fontWeight = FontWeight.Bold) }; Spacer(Modifier.weight(1f)); Text(m.format, color = Green, fontWeight = FontWeight.Bold, maxLines = 1) }
         Text(m.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold); Text("${m.mode} · ${m.dateLabel}"); Text("${m.venue} · ${m.zone}"); Text("Organiza: ${m.ownerName}"); Text("Costo: ${m.price.ifBlank { "A confirmar" }}")
         if (canApply) {
             val label = when {
@@ -602,7 +683,7 @@ private fun MatchManagement(m: MatchData, showMessage: (String) -> Unit) {
             Card { Column(Modifier.fillMaxWidth().padding(12.dp)) {
                 Text(a.name, fontWeight = FontWeight.Bold)
                 Text("Estado: ${statusLabel(a.status)}", color = Color.Gray)
-                if (a.status == "pending") Row {
+                if (a.status == "pending") FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Button(onClick = {
                         val ref = db.collection("matches").document(m.id).collection("applications").document(a.uid)
                         joinMatch(m.id, a.uid, a.name, "application", ref, mapOf("status" to "accepted", "decidedAt" to Timestamp.now()), "${a.name} quedó confirmado en el partido.", showMessage)
@@ -646,7 +727,7 @@ private fun PlayerInvitations(matches: List<MatchData>, uid: String, playerName:
                     Text(match.title, fontWeight = FontWeight.Bold)
                     Text("${match.dateLabel} · ${match.venue}")
                     Text("Organiza: ${match.ownerName} · ${if (match.status == "full") "completo" else "${match.playersNeeded} vacantes"}", color = Color.Gray)
-                    Row {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         Button(enabled = match.status == "open", onClick = {
                             val ref = db.collection("matches").document(match.id).collection("invitations").document(uid)
                             joinMatch(match.id, uid, playerName, "invitation", ref, mapOf("status" to "accepted", "respondedAt" to Timestamp.now()), "¡Listo! Quedaste confirmado en ${match.title}.", showMessage)

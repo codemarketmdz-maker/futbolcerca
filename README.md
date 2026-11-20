@@ -1,6 +1,13 @@
-# Fútbol Cerca 2.2.0
+# Fútbol Cerca 2.3.0
 
 Proyecto Android Kotlin + Jetpack Compose + Firebase Authentication/Firestore + OpenStreetMap (osmdroid).
+
+## Novedades 2.3.0
+- Ícono de la app (cancha de fútbol) y recursos `res/` que faltaban.
+- Pantalla solo vertical, pensada para celulares: chips y botones se acomodan en varias líneas, barra inferior con etiquetas cortas.
+- Los formularios suben con el teclado y se pueden desplazar; la barra inferior se oculta mientras se escribe.
+- El mapa se ajusta solo para mostrar todas las zonas, indica cuántos jugadores/partidos tienen zona y completa solas las zonas que quedaron sin coordenadas.
+- Si Firestore rechaza una lectura (reglas sin publicar), aparece un cartel rojo con el error real en vez de quedar el mapa vacío.
 
 ## Novedades 2.2.0
 - **Aceptar/rechazar ya no da PERMISSION_DENIED** (hay que publicar las reglas nuevas, ver abajo).
