@@ -8,6 +8,13 @@ android {
     namespace = "com.futbolcerca.app"
     compileSdk = 35
 
+    // Mantener Java y Kotlin en el mismo objetivo de JVM para evitar
+    // errores de compatibilidad durante compileDebugKotlin.
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
     defaultConfig {
         applicationId = "com.futbolcerca.app"
         minSdk = 24
@@ -16,6 +23,10 @@ android {
         versionName = "1.0.0"
     }
     buildFeatures { compose = true }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
 }
 
 dependencies {
