@@ -1,22 +1,19 @@
-# Fútbol Cerca — Android
+# Fútbol Cerca – Android
 
-Prototipo Android nativo con Jetpack Compose para organizar partidos de fútbol 5 y 7.
+## Firebase conectado
+- Proyecto Firebase: `futbolcerca-e94f0`
+- Paquete Android: `com.futbolcerca.app`
+- Firebase Authentication (correo/contraseña) y Cloud Firestore.
+- `google-services.json` está en `app/`.
 
-## Incluye en esta primera entrega
-- Selector de rol: jugador, capitán y cancha.
-- Listado de partidos de demostración y filtros masculino, femenino y mixto.
-- Postulación simulada a partidos.
-- Perfil deportivo básico editable.
-- Panel del capitán, revisión simulada de postulaciones y búsqueda urgente conceptual.
-- Panel de cancha con partidos de ejemplo.
-- Acceso a compartir una invitación por WhatsApp mediante el menú de compartir/enlace.
-- Workflow de GitHub Actions para compilar un APK debug.
+## Antes de probar
+1. En Firebase Console > Authentication > Sign-in method, habilitá **Correo electrónico/Contraseña**.
+2. En Firestore Database, creá la base de datos.
+3. Publicá las reglas de `firestore.rules` desde la sección Rules de Firestore.
+4. Compilá con GitHub Actions.
 
-## Compilar en GitHub
-1. Crear un repositorio nuevo y subir el contenido de esta carpeta.
-2. Abrir la pestaña **Actions**.
-3. Ejecutar **Compilar Fútbol Cerca APK** con `Run workflow` o hacer un push.
-4. Descargar el artefacto `Futbol-Cerca-debug-apk` al finalizar.
+## Registro y roles
+El usuario elige Jugador, Capitán o Dueño/administrador de cancha al crear la cuenta. El rol queda guardado en `users/{uid}` y no se ofrece un selector para cambiar de rol en la pantalla principal. Las cuentas de capitán y cancha quedan con `verificationStatus: pending`; esta versión no implementa todavía el proceso de verificación documental.
 
-## Importante
-Esta entrega es un prototipo local: usa datos ficticios y no sincroniza usuarios entre teléfonos. El mapa, autenticación, verificación de capitanes/canchas, almacenamiento de fotos y videos, notificaciones y mensajería real requieren configurar servicios y permisos en una siguiente etapa. No se solicita ni se comparte la dirección exacta del jugador públicamente.
+## Limitaciones de esta entrega
+Los partidos y postulaciones del panel siguen siendo datos de demostración. La autenticación y el guardado del tipo de cuenta sí usan Firebase. No publicar la app en producción hasta completar reglas específicas para partidos, solicitudes, perfiles públicos, almacenamiento y moderación.

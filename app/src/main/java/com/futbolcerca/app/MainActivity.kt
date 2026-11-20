@@ -23,6 +23,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
+import com.google.firebase.Timestamp
 
 private val Forest = Color(0xFF123B2D)
 private val Lime = Color(0xFFC6F36B)
@@ -32,7 +37,105 @@ private val Ink = Color(0xFF17251E)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { FutbolCercaApp() }
+        setContent { AuthGate() }
+    }
+}
+
+
+@Composable
+private fun AuthGate() {
+    val auth = remember { FirebaseAuth.getInstance() }
+    val db = remember { FirebaseFirestore.getInstance() }
+    var currentUser by remember { mutableStateOf(auth.currentUser) }
+    var storedRole by remember { mutableStateOf<String?>(null) }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(auth) {
+        val listener = FirebaseAuth.AuthStateListener { currentUser = it.currentUser; storedRole = null }
+        auth.addAuthStateListener(listener)
+        onDispose { auth.removeAuthStateListener(listener) }
+    }
+    LaunchedEffect(currentUser?.uid) {
+        val uid = currentUser?.uid ?: return@LaunchedEffect
+        loading = true
+        db.collection("users").document(uid).get()
+            .addOnSuccessListener { doc -> storedRole = doc.getString("role"); loading = false }
+            .addOnFailureListener { e -> error = e.localizedMessage ?: "No se pudo leer el perfil"; loading = false }
+    }
+
+    MaterialTheme(colorScheme = lightColorScheme(primary = Forest, secondary = Lime, background = Pale, surface = Color.White)) {
+        when {
+            currentUser == null -> AuthScreen(auth, db, onError = { error = it }, onLoading = { loading = it })
+            loading -> Box(Modifier.fillMaxSize().background(Pale), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            storedRole == null -> RoleSetupScreen(currentUser!!.uid, db, onError = { error = it }, onLoading = { loading = it })
+            else -> FutbolCercaApp(role = storedRole!!, onLogout = { auth.signOut(); storedRole = null })
+        }
+        error?.let { msg -> AlertDialog(onDismissRequest = { error = null }, confirmButton = { TextButton(onClick = { error = null }) { Text("Cerrar") } }, title = { Text("Atención") }, text = { Text(msg) }) }
+    }
+}
+
+@Composable
+private fun AuthScreen(auth: FirebaseAuth, db: FirebaseFirestore, onError: (String) -> Unit, onLoading: (Boolean) -> Unit) {
+    var registering by remember { mutableStateOf(true) }
+    var name by remember { mutableStateOf("") }
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var role by remember { mutableStateOf("Jugador") }
+    Column(Modifier.fillMaxSize().background(Pale).padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+        Icon(Icons.Default.SportsSoccer, null, tint = Forest, modifier = Modifier.size(58.dp))
+        Text("FÚTBOL CERCA", fontSize = 25.sp, fontWeight = FontWeight.Black, color = Forest)
+        Text(if (registering) "Creá tu cuenta" else "Bienvenido nuevamente", color = Color.Gray)
+        Spacer(Modifier.height(22.dp))
+        if (registering) {
+            OutlinedTextField(name, { name = it }, label = { Text("Nombre completo") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+            Spacer(Modifier.height(8.dp))
+            Text("Tipo de cuenta", fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.Start))
+            Column(Modifier.fillMaxWidth()) {
+                listOf("Jugador", "Capitán", "Cancha").forEach { item ->
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(selected = role == item, onClick = { role = item })
+                        Text(when(item) { "Cancha" -> "Dueño / administrador de cancha"; else -> item })
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(email, { email = it }, label = { Text("Correo electrónico") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(password, { password = it }, label = { Text("Contraseña (mínimo 6 caracteres)") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), singleLine = true)
+        Spacer(Modifier.height(16.dp))
+        Button(onClick = {
+            if (email.isBlank() || password.length < 6 || (registering && name.isBlank())) { onError("Completá los datos. La contraseña debe tener al menos 6 caracteres."); return@Button }
+            onLoading(true)
+            val task = if (registering) auth.createUserWithEmailAndPassword(email.trim(), password) else auth.signInWithEmailAndPassword(email.trim(), password)
+            task.addOnSuccessListener { result ->
+                if (registering) {
+                    val uid = result.user!!.uid
+                    val data = hashMapOf("displayName" to name.trim(), "role" to role, "verificationStatus" to if (role == "Jugador") "not_required" else "pending", "createdAt" to Timestamp.now())
+                    db.collection("users").document(uid).set(data).addOnSuccessListener { onLoading(false) }.addOnFailureListener { onLoading(false); onError(it.localizedMessage ?: "No se pudo guardar el perfil") }
+                } else onLoading(false)
+            }.addOnFailureListener { onLoading(false); onError(it.localizedMessage ?: "No se pudo iniciar sesión") }
+        }, modifier = Modifier.fillMaxWidth()) { Text(if (registering) "Crear cuenta" else "Ingresar") }
+        TextButton(onClick = { registering = !registering }) { Text(if (registering) "Ya tengo cuenta · Iniciar sesión" else "Crear una cuenta nueva") }
+        Text("Cada cuenta tiene un único tipo de acceso. Los capitanes y canchas quedan pendientes de verificación.", color = Color.Gray, fontSize = 11.sp)
+    }
+}
+
+@Composable
+private fun RoleSetupScreen(uid: String, db: FirebaseFirestore, onError: (String) -> Unit, onLoading: (Boolean) -> Unit) {
+    var role by remember { mutableStateOf("Jugador") }
+    Column(Modifier.fillMaxSize().background(Pale).padding(24.dp), verticalArrangement = Arrangement.Center) {
+        Text("Completá tu tipo de cuenta", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = Forest)
+        Text("Esta elección define las pantallas y permisos de tu cuenta.", color = Color.Gray)
+        Spacer(Modifier.height(16.dp))
+        listOf("Jugador", "Capitán", "Cancha").forEach { item -> Row(verticalAlignment = Alignment.CenterVertically) { RadioButton(role == item, { role = item }); Text(if (item == "Cancha") "Dueño / administrador de cancha" else item) } }
+        Spacer(Modifier.height(16.dp))
+        Button(onClick = {
+            onLoading(true)
+            val data = mapOf("role" to role, "verificationStatus" to if (role == "Jugador") "not_required" else "pending", "createdAt" to Timestamp.now())
+            db.collection("users").document(uid).set(data, SetOptions.merge()).addOnSuccessListener { onLoading(false) }.addOnFailureListener { onLoading(false); onError(it.localizedMessage ?: "No se pudo guardar el tipo de cuenta") }
+        }, modifier = Modifier.fillMaxWidth()) { Text("Continuar") }
     }
 }
 
@@ -49,9 +152,8 @@ private val sampleMatches = listOf(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FutbolCercaApp() {
-    var role by remember { mutableStateOf("Jugador") }
-    var page by remember { mutableStateOf("Partidos") }
+fun FutbolCercaApp(role: String, onLogout: () -> Unit) {
+    var page by remember { mutableStateOf(if (role == "Jugador") "Partidos" else if (role == "Capitán") "Equipo" else "Gestión") }
     var selectedMode by remember { mutableStateOf("Todas") }
     var applied by remember { mutableStateOf(setOf<String>()) }
     var approved by remember { mutableStateOf(false) }
@@ -79,7 +181,11 @@ fun FutbolCercaApp() {
             },
             bottomBar = {
                 NavigationBar(containerColor = Color.White) {
-                    val items = listOf("Partidos" to Icons.Default.SportsSoccer, "Mapa" to Icons.Default.Map, "Perfil" to Icons.Default.Person)
+                    val items = when (role) {
+                        "Jugador" -> listOf("Partidos" to Icons.Default.SportsSoccer, "Mapa" to Icons.Default.Map, "Perfil" to Icons.Default.Person)
+                        "Capitán" -> listOf("Equipo" to Icons.Default.Groups, "Buscar" to Icons.Default.PersonSearch, "Solicitudes" to Icons.Default.MarkEmailUnread)
+                        else -> listOf("Gestión" to Icons.Default.Business, "Partidos" to Icons.Default.SportsSoccer, "Publicar" to Icons.Default.Add)
+                    }
                     items.forEach { (label, icon) ->
                         NavigationBarItem(selected = page == label, onClick = { page = label }, icon = { Icon(icon, null) }, label = { Text(label) })
                     }
@@ -94,18 +200,6 @@ fun FutbolCercaApp() {
                             Text("Encontrá tu próximo partido", color = Color.Gray)
                         }
                         Surface(color = Color(0xFFE3F5D3), shape = CircleShape) { Text("DEMO", Modifier.padding(horizontal = 12.dp, vertical = 7.dp), color = Forest, fontWeight = FontWeight.Bold, fontSize = 11.sp) }
-                    }
-                }
-                item {
-                    Card(colors = CardDefaults.cardColors(containerColor = Forest), shape = RoundedCornerShape(20.dp)) {
-                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Text("USAR COMO", color = Color(0xFFD7E7DC), fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                listOf("Jugador", "Capitán", "Cancha").forEach { r ->
-                                    FilterChip(selected = role == r, onClick = { role = r; page = if (r == "Jugador") "Partidos" else if (r == "Capitán") "Equipo" else "Gestión" }, label = { Text(r) }, colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Lime, selectedLabelColor = Forest))
-                                }
-                            }
-                        }
                     }
                 }
                 if (role == "Jugador") {
@@ -201,7 +295,7 @@ fun FutbolCercaApp() {
                     item { Button(onClick = { page = "Publicar" }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Add, null); Spacer(Modifier.width(8.dp)); Text("Publicar partido") } }
                     if (page == "Publicar") item { Text("Formulario de publicación completo y calendario se implementarán en la siguiente etapa.", color = Color.Gray, fontSize = 12.sp) }
                 }
-                item { Spacer(Modifier.height(8.dp)); Text("FÚTBOL CERCA · PROTOTIPO 1.0 · Datos de demostración", color = Color.Gray, fontSize = 10.sp) }
+                item { Spacer(Modifier.height(8.dp)); Text("FÚTBOL CERCA · Cuenta: $role", color = Color.Gray, fontSize = 10.sp); OutlinedButton(onClick = onLogout, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Cerrar sesión") } }
             }
         }
     }
