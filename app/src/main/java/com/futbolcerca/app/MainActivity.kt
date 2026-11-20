@@ -1,4 +1,3 @@
-
 package com.futbolcerca.app
 
 import android.content.Intent
@@ -6,1014 +5,378 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
+import java.net.URLEncoder
 
-private val Forest = Color(0xFF123B2D)
-private val Lime = Color(0xFFC6F36B)
-private val Pale = Color(0xFFF3F6F1)
-private val Ink = Color(0xFF17251E)
+private val db get() = FirebaseFirestore.getInstance()
+private val auth get() = FirebaseAuth.getInstance()
+private const val WHATSAPP = "https://wa.me/542615117220"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { AuthGate() }
+        setContent { MaterialTheme { Root() } }
     }
 }
 
 @Composable
-private fun AuthGate() {
-    val auth = remember { FirebaseAuth.getInstance() }
-    val db = remember { FirebaseFirestore.getInstance() }
+private fun Root() {
+    var user by remember { mutableStateOf(auth.currentUser) }
+    var profile by remember { mutableStateOf<Map<String, Any>?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf("") }
 
-    var currentUser by remember { mutableStateOf(auth.currentUser) }
-    var storedRole by remember { mutableStateOf<String?>(null) }
-    var storedName by remember { mutableStateOf("") }
-    var loading by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-
-    DisposableEffect(auth) {
-        val listener = FirebaseAuth.AuthStateListener {
-            currentUser = it.currentUser
-            storedRole = null
-            storedName = ""
-        }
-        auth.addAuthStateListener(listener)
-        onDispose { auth.removeAuthStateListener(listener) }
+    DisposableEffect(Unit) {
+        val l = FirebaseAuth.AuthStateListener { user = it.currentUser; profile = null }
+        auth.addAuthStateListener(l)
+        onDispose { auth.removeAuthStateListener(l) }
+    }
+    LaunchedEffect(user?.uid) {
+        val uid = user?.uid ?: return@LaunchedEffect
+        busy = true
+        db.collection("users").document(uid).get()
+            .addOnSuccessListener { profile = it.data; busy = false }
+            .addOnFailureListener { error = it.localizedMessage ?: "Error de perfil"; busy = false }
     }
 
-    LaunchedEffect(currentUser?.uid) {
-        val uid = currentUser?.uid
-        if (uid != null) {
-            loading = true
-            db.collection("users").document(uid).get()
-                .addOnSuccessListener { doc ->
-                    storedRole = doc.getString("role")
-                    storedName = doc.getString("displayName") ?: ""
-                    loading = false
-                }
-                .addOnFailureListener {
-                    error = it.localizedMessage ?: "No se pudo cargar el perfil"
-                    loading = false
-                }
+    if (user == null) AuthPage(
+        onBusy = { busy = it },
+        onError = { error = it },
+        onReady = { profile = it }
+    ) else if (busy || profile == null) {
+        Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
+            CircularProgressIndicator()
+            Text("Cargando cuenta…")
         }
-    }
-
-    MaterialTheme(
-        colorScheme = lightColorScheme(
-            primary = Forest,
-            secondary = Lime,
-            background = Pale,
-            surface = Color.White
+    } else {
+        MainPage(
+            uid = user!!.uid,
+            profile = profile!!,
+            onError = { error = it },
+            onLogout = { auth.signOut(); profile = null }
         )
-    ) {
-        when {
-            currentUser == null -> AuthScreen(
-                auth, db,
-                onError = { error = it },
-                onLoading = { loading = it }
-            )
-
-            loading -> Box(
-                Modifier.fillMaxSize().background(Pale),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator()
-            }
-
-            storedRole == null -> RoleSetupScreen(
-                currentUser!!.uid, db,
-                onError = { error = it },
-                onLoading = { loading = it }
-            )
-
-            else -> FutbolCercaApp(
-                role = storedRole!!,
-                uid = currentUser!!.uid,
-                initialName = storedName,
-                db = db,
-                onNameChanged = { storedName = it },
-                onLogout = { auth.signOut() }
-            )
-        }
-
-        error?.let { msg ->
-            AlertDialog(
-                onDismissRequest = { error = null },
-                confirmButton = {
-                    TextButton(onClick = { error = null }) { Text("Cerrar") }
-                },
-                title = { Text("Atención") },
-                text = { Text(msg) }
-            )
-        }
     }
+    if (error.isNotBlank()) AlertDialog(
+        onDismissRequest = { error = "" },
+        confirmButton = { TextButton2("Cerrar") { error = "" } },
+        title = { Text("Fútbol Cerca") },
+        text = { Text(error) }
+    )
 }
 
 @Composable
-private fun AuthScreen(
-    auth: FirebaseAuth,
-    db: FirebaseFirestore,
-    onError: (String) -> Unit,
-    onLoading: (Boolean) -> Unit
-) {
+private fun TextButton2(label: String, click: () -> Unit) {
+    TextButton(onClick = click) { Text(label) }
+}
+
+@Composable
+private fun AuthPage(onBusy: (Boolean) -> Unit, onError: (String) -> Unit,
+                     onReady: (Map<String, Any>) -> Unit) {
     var registering by remember { mutableStateOf(true) }
     var name by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var role by remember { mutableStateOf("Jugador") }
 
-    Column(
-        Modifier.fillMaxSize().background(Pale).padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Icon(Icons.Default.SportsSoccer, null, tint = Forest, modifier = Modifier.size(58.dp))
-        Text("FÚTBOL CERCA", fontSize = 25.sp, fontWeight = FontWeight.Black, color = Forest)
-        Text(if (registering) "Creá tu cuenta" else "Bienvenido nuevamente", color = Color.Gray)
-
-        Spacer(Modifier.height(22.dp))
-
+    Column(Modifier.fillMaxSize().padding(22.dp), verticalArrangement = Arrangement.Center) {
+        Text("⚽ FÚTBOL CERCA", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
+        Text(if (registering) "Creá tu cuenta" else "Ingresá")
         if (registering) {
-            OutlinedTextField(
-                name, { name = it },
-                label = { Text("Nombre completo") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-
-            Spacer(Modifier.height(8.dp))
-            Text("Tipo de cuenta", fontWeight = FontWeight.Bold)
-
-            listOf("Jugador", "Capitán", "Cancha").forEach { item ->
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    RadioButton(role == item, { role = item })
-                    Text(if (item == "Cancha") "Dueño / administrador de cancha" else item)
+            OutlinedTextField(name, { name = it }, label = { Text("Nombre") }, modifier = Modifier.fillMaxWidth())
+            Text("Tipo de cuenta")
+            listOf("Jugador", "Capitán", "Cancha").forEach {
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    RadioButton(role == it, { role = it })
+                    Text(if (it == "Cancha") "Dueño de cancha" else it)
                 }
             }
         }
-
-        Spacer(Modifier.height(8.dp))
-
-        OutlinedTextField(
-            email, { email = it },
-            label = { Text("Correo electrónico") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-
-        Spacer(Modifier.height(8.dp))
-
-        OutlinedTextField(
-            password, { password = it },
-            label = { Text("Contraseña (mínimo 6 caracteres)") },
-            visualTransformation = PasswordVisualTransformation(),
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-
-        Spacer(Modifier.height(16.dp))
-
-        Button(
-            onClick = {
-                if (email.isBlank() || password.length < 6 ||
-                    (registering && name.isBlank())
-                ) {
-                    onError("Completá los datos. La contraseña debe tener al menos 6 caracteres.")
-                    return@Button
-                }
-
-                onLoading(true)
-
-                val task = if (registering) {
-                    auth.createUserWithEmailAndPassword(email.trim(), password)
+        OutlinedTextField(email, { email = it }, label = { Text("Correo") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(password, { password = it }, label = { Text("Contraseña (6 caracteres mínimo)") },
+            visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+        Button(onClick = {
+            if (email.isBlank() || password.length < 6 || (registering && name.isBlank())) {
+                onError("Completá los datos. La contraseña debe tener al menos 6 caracteres."); return@Button
+            }
+            onBusy(true)
+            val task = if (registering) auth.createUserWithEmailAndPassword(email.trim(), password)
+                       else auth.signInWithEmailAndPassword(email.trim(), password)
+            task.addOnSuccessListener { result ->
+                if (registering) {
+                    val uid = result.user!!.uid
+                    val data = hashMapOf<String, Any>(
+                        "displayName" to name.trim(), "role" to role,
+                        "verificationStatus" to if (role == "Jugador") "not_required" else "pending",
+                        "createdAt" to Timestamp.now(), "trialStartedAt" to Timestamp.now()
+                    )
+                    db.collection("users").document(uid).set(data)
+                        .addOnSuccessListener { onBusy(false); onReady(data) }
+                        .addOnFailureListener { onBusy(false); onError(it.localizedMessage ?: "No se guardó el perfil") }
                 } else {
-                    auth.signInWithEmailAndPassword(email.trim(), password)
+                    db.collection("users").document(result.user!!.uid).get()
+                        .addOnSuccessListener { onBusy(false); onReady(it.data ?: emptyMap()) }
+                        .addOnFailureListener { onBusy(false); onError(it.localizedMessage ?: "No se pudo cargar la cuenta") }
                 }
-
-                task.addOnSuccessListener { result ->
-                    if (registering) {
-                        val uid = result.user!!.uid
-                        val data = hashMapOf(
-                            "displayName" to name.trim(),
-                            "role" to role,
-                            "verificationStatus" to
-                                if (role == "Jugador") "not_required" else "pending",
-                            "createdAt" to Timestamp.now()
-                        )
-
-                        db.collection("users").document(uid).set(data)
-                            .addOnSuccessListener { onLoading(false) }
-                            .addOnFailureListener {
-                                onLoading(false)
-                                onError(it.localizedMessage ?: "No se pudo guardar el perfil")
-                            }
-                    } else {
-                        onLoading(false)
-                    }
-                }.addOnFailureListener {
-                    onLoading(false)
-                    onError(it.localizedMessage ?: "No se pudo iniciar sesión")
-                }
-            },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(if (registering) "Crear cuenta" else "Ingresar")
-        }
-
-        TextButton(onClick = { registering = !registering }) {
-            Text(
-                if (registering) "Ya tengo cuenta · Iniciar sesión"
-                else "Crear una cuenta nueva"
-            )
-        }
-
-        Text(
-            "Cada cuenta tiene un único tipo de acceso. " +
-                "Los capitanes y canchas quedan pendientes de verificación.",
-            color = Color.Gray,
-            fontSize = 11.sp
-        )
+            }.addOnFailureListener { onBusy(false); onError(it.localizedMessage ?: "Error de autenticación") }
+        }, modifier = Modifier.fillMaxWidth()) { Text(if (registering) "Crear cuenta" else "Ingresar") }
+        TextButton2(if (registering) "Ya tengo cuenta" else "Crear cuenta") { registering = !registering }
+        Text("Prueba gratuita anunciada: 7 días. La activación comercial se solicita a CodeMarket.")
     }
 }
 
+private data class MatchItem(
+    val id: String, val title: String, val mode: String, val format: String,
+    val dateTime: String, val venue: String, val zone: String, val price: String,
+    val ownerUid: String, val ownerName: String, val status: String
+)
+
 @Composable
-private fun RoleSetupScreen(
-    uid: String,
-    db: FirebaseFirestore,
-    onError: (String) -> Unit,
-    onLoading: (Boolean) -> Unit
-) {
-    var role by remember { mutableStateOf("Jugador") }
+private fun MainPage(uid: String, profile: Map<String, Any>, onError: (String) -> Unit,
+                     onLogout: () -> Unit) {
+    val role = profile["role"] as? String ?: "Jugador"
+    val name = profile["displayName"] as? String ?: "Usuario"
+    var tab by remember { mutableStateOf(if (role == "Jugador") "Partidos" else if (role == "Capitán") "Equipo" else "Gestión") }
+    var matches by remember { mutableStateOf(listOf<MatchItem>()) }
+    var people by remember { mutableStateOf(listOf<Map<String, Any>>()) }
+    var apps by remember { mutableStateOf(listOf<Map<String, Any>>()) }
+    var selectedMatch by remember { mutableStateOf<MatchItem?>(null) }
+    var nameEdit by remember { mutableStateOf(name) }
+    var age by remember { mutableStateOf((profile["age"] as? Long)?.toString() ?: "") }
+    var gender by remember { mutableStateOf(profile["gender"] as? String ?: "Masculino") }
+    var positions by remember { mutableStateOf(profile["positions"] as? String ?: "") }
+    var skills by remember { mutableStateOf(profile["skills"] as? String ?: "") }
+    var availability by remember { mutableStateOf(profile["availability"] as? String ?: "Ahora mismo") }
+    var zone by remember { mutableStateOf(profile["zone"] as? String ?: "") }
 
-    Column(
-        Modifier.fillMaxSize().background(Pale).padding(24.dp),
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text(
-            "Completá tu tipo de cuenta",
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
-            color = Forest
-        )
-
-        Text("Esta elección define las pantallas y permisos de tu cuenta.", color = Color.Gray)
-        Spacer(Modifier.height(16.dp))
-
-        listOf("Jugador", "Capitán", "Cancha").forEach { item ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                RadioButton(role == item, { role = item })
-                Text(if (item == "Cancha") "Dueño / administrador de cancha" else item)
+    DisposableEffect(role) {
+        val registrations = mutableListOf<ListenerRegistration>()
+        val m = db.collection("matches").whereEqualTo("status", "open")
+            .addSnapshotListener { snap, e ->
+                if (e != null) onError(e.localizedMessage ?: "Error cargando partidos")
+                else matches = snap?.documents.orEmpty().map { d ->
+                    MatchItem(d.id, d.getString("title") ?: "Partido",
+                        d.getString("mode") ?: "Mixto", d.getString("format") ?: "Fútbol 5",
+                        d.getString("dateTime") ?: "", d.getString("venue") ?: "",
+                        d.getString("zone") ?: "", d.getString("price") ?: "",
+                        d.getString("ownerUid") ?: "", d.getString("ownerName") ?: "",
+                        d.getString("status") ?: "open")
+                }
             }
+        registrations.add(m)
+        if (role == "Capitán") {
+            registrations.add(db.collection("users").whereEqualTo("role", "Jugador")
+                .addSnapshotListener { snap, e ->
+                    if (e != null) onError(e.localizedMessage ?: "Error buscando jugadores")
+                    else people = snap?.documents.orEmpty().filter { it.id != uid }.mapNotNull { it.data }
+                })
         }
-
-        Spacer(Modifier.height(16.dp))
-
-        Button(
-            onClick = {
-                onLoading(true)
-                val data = mapOf(
-                    "role" to role,
-                    "verificationStatus" to
-                        if (role == "Jugador") "not_required" else "pending",
-                    "createdAt" to Timestamp.now()
-                )
-
-                db.collection("users").document(uid)
-                    .set(data, SetOptions.merge())
-                    .addOnSuccessListener { onLoading(false) }
-                    .addOnFailureListener {
-                        onLoading(false)
-                        onError(it.localizedMessage ?: "No se pudo guardar el tipo de cuenta")
-                    }
-            },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Continuar")
-        }
+        onDispose { registrations.forEach { it.remove() } }
     }
-}
-
-data class Match(
-    val title: String,
-    val mode: String,
-    val format: String,
-    val time: String,
-    val place: String,
-    val distance: String,
-    val missing: Int,
-    val price: String
-)
-
-private val sampleMatches = listOf(
-    Match("Partido de esta noche", "Mixto", "Fútbol 5", "Hoy · 23:30", "Cancha Centro", "1,2 km", 1, "$4.000"),
-    Match("Buscamos dos jugadores", "Masculino", "Fútbol 7", "Mañana · 20:00", "Complejo Las Heras", "3,5 km", 2, "$3.500"),
-    Match("Fútbol femenino", "Femenino", "Fútbol 5", "Sábado · 18:00", "Cancha Parque", "2,1 km", 2, "$3.000")
-)
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun FutbolCercaApp(
-    role: String,
-    uid: String,
-    initialName: String,
-    db: FirebaseFirestore,
-    onNameChanged: (String) -> Unit,
-    onLogout: () -> Unit
-) {
-    var page by remember {
-        mutableStateOf(
-            if (role == "Jugador") "Partidos"
-            else if (role == "Capitán") "Equipo" else "Gestión"
-        )
-    }
-
-    var selectedMode by remember { mutableStateOf("Todas") }
-    var applied by remember { mutableStateOf(setOf<String>()) }
-    var approved by remember { mutableStateOf(false) }
-    var urgent by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
-    val shownName = initialName.ifBlank { "Usuario" }
-
-    MaterialTheme(
-        colorScheme = lightColorScheme(
-            primary = Forest,
-            secondary = Lime,
-            background = Pale,
-            surface = Color.White
-        )
-    ) {
-        Scaffold(
-            containerColor = Pale,
-            topBar = {
-                CenterAlignedTopAppBar(
-                    title = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.SportsSoccer, null, tint = Lime)
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                "FÚTBOL CERCA",
-                                fontWeight = FontWeight.Black,
-                                color = Color.White
-                            )
-                        }
-                    },
-                    colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                        containerColor = Forest
-                    )
-                )
-            },
-            bottomBar = {
-                NavigationBar(containerColor = Color.White) {
-                    val navItems = when (role) {
-                        "Jugador" -> listOf(
-                            "Partidos" to Icons.Default.SportsSoccer,
-                            "Mapa" to Icons.Default.Map,
-                            "Perfil" to Icons.Default.Person
-                        )
-                        "Capitán" -> listOf(
-                            "Equipo" to Icons.Default.Groups,
-                            "Buscar" to Icons.Default.PersonSearch,
-                            "Solicitudes" to Icons.Default.MarkEmailUnread
-                        )
-                        else -> listOf(
-                            "Gestión" to Icons.Default.Business,
-                            "Partidos" to Icons.Default.SportsSoccer,
-                            "Publicar" to Icons.Default.Add
-                        )
-                    }
-
-                    navItems.forEach { (label, icon) ->
-                        NavigationBarItem(
-                            selected = page == label,
-                            onClick = { page = label },
-                            icon = { Icon(icon, null) },
-                            label = { Text(label) }
-                        )
-                    }
-                }
+    Scaffold(bottomBar = {
+        NavigationBar {
+            val tabs = when (role) {
+                "Jugador" -> listOf("Partidos", "Mapa", "Perfil")
+                "Capitán" -> listOf("Equipo", "Buscar", "Solicitudes", "Publicar")
+                else -> listOf("Gestión", "Partidos", "Publicar")
             }
-        ) { padding ->
-            LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(padding),
-                contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                item {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text(
-                                "Hola, ${shownName.substringBefore(" ")} 👋",
-                                style = MaterialTheme.typography.headlineSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = Ink
-                            )
-                            Text("Encontrá tu próximo partido", color = Color.Gray)
-                        }
+            tabs.forEach { t -> NavigationBarItem(tab == t, { tab = t }, icon = { Text("⚽") }, label = { Text(t) }) }
+        }
+    }) { pad ->
+        LazyColumn(Modifier.fillMaxSize().padding(pad).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            item {
+                Text("Hola, ${name.substringBefore(" ")}", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Text("FÚTBOL CERCA · $role")
+            }
 
-                        Surface(color = Color(0xFFE3F5D3), shape = CircleShape) {
-                            Text(
-                                "FÚTBOL",
-                                Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                                color = Forest,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp
-                            )
-                        }
-                    }
+            if (role == "Jugador" && tab == "Perfil") {
+                item { Text("Mi perfil deportivo", style = MaterialTheme.typography.titleLarge) }
+                item { OutlinedTextField(nameEdit, { nameEdit = it }, label = { Text("Nombre") }, modifier = Modifier.fillMaxWidth()) }
+                item { OutlinedTextField(age, { age = it.filter(Char::isDigit).take(2) }, label = { Text("Edad") }, modifier = Modifier.fillMaxWidth()) }
+                item { Text("Género") }
+                item { Row { listOf("Masculino", "Femenino", "Otro").forEach { FilterChip(gender == it, { gender = it }, label = { Text(it) }) } } }
+                item { OutlinedTextField(positions, { positions = it }, label = { Text("Posiciones") }, modifier = Modifier.fillMaxWidth()) }
+                item { OutlinedTextField(skills, { skills = it }, label = { Text("Habilidades") }, modifier = Modifier.fillMaxWidth()) }
+                item { OutlinedTextField(availability, { availability = it }, label = { Text("Disponibilidad") }, modifier = Modifier.fillMaxWidth()) }
+                item { OutlinedTextField(zone, { zone = it }, label = { Text("Zona o barrio aproximado") }, modifier = Modifier.fillMaxWidth()) }
+                item { Button(onClick = {
+                    val data = hashMapOf<String, Any>("displayName" to nameEdit.trim(), "gender" to gender,
+                        "positions" to positions.trim(), "skills" to skills.trim(), "availability" to availability.trim(),
+                        "zone" to zone.trim(), "profileUpdatedAt" to Timestamp.now())
+                    age.toIntOrNull()?.let { data["age"] = it }
+                    db.collection("users").document(uid).set(data, SetOptions.merge())
+                        .addOnSuccessListener { onError("Perfil guardado") }
+                        .addOnFailureListener { onError(it.localizedMessage ?: "No se pudo guardar") }
+                }, modifier = Modifier.fillMaxWidth()) { Text("Guardar perfil") } }
+            } else if (tab == "Mapa") {
+                item { Text("Mapa de OpenStreetMap", style = MaterialTheme.typography.titleLarge) }
+                item { Text("El mapa abre en el navegador usando la zona aproximada del perfil. No publica tu domicilio.") }
+                item { Button(onClick = {
+                    val q = URLEncoder.encode(zone.ifBlank { "Mendoza Argentina" }, "UTF-8")
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.openstreetmap.org/search?query=$q")))
+                }) { Text("Ver mi zona en el mapa") } }
+            } else if (tab == "Publicar") {
+                item { PublishMatch(uid, name, zone, onError) }
+            } else if (tab == "Buscar") {
+                item { Text("Jugadores registrados", style = MaterialTheme.typography.titleLarge) }
+                items(people) { p ->
+                    Card { Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                        Text(p["displayName"] as? String ?: "Jugador", fontWeight = FontWeight.Bold)
+                        Text("Zona: ${p["zone"] ?: "No indicada"} · ${p["positions"] ?: "Posición no indicada"}")
+                        Text("Disponibilidad: ${p["availability"] ?: "No indicada"}")
+                    } }
                 }
-
-                if (role == "Jugador") {
-                    when (page) {
-                        "Partidos" -> {
-                            item {
-                                Text(
-                                    "Partidos cerca de vos",
-                                    style = MaterialTheme.typography.titleLarge,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-
-                            item {
-                                Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                                    listOf("Todas", "Masculino", "Femenino", "Mixto").forEach { mode ->
-                                        FilterChip(
-                                            selected = selectedMode == mode,
-                                            onClick = { selectedMode = mode },
-                                            label = { Text(mode, fontSize = 10.sp) }
-                                        )
-                                    }
-                                }
-                            }
-
-                            items(sampleMatches.filter {
-                                selectedMode == "Todas" || it.mode == selectedMode
-                            }) { match ->
-                                MatchCard(
-                                    match,
-                                    applied.contains(match.title),
-                                    onApply = { applied = applied + match.title },
-                                    onWhatsApp = {
-                                        val message =
-                                            "Hola, me interesa sumarme al partido: " +
-                                                "${match.title} - ${match.time}. ¿Hay lugar?"
-                                        val intent = Intent(
-                                            Intent.ACTION_VIEW,
-                                            Uri.parse("https://wa.me/?text=" + Uri.encode(message))
-                                        )
-                                        context.startActivity(intent)
-                                    }
-                                )
-                            }
-                        }
-
-                        "Mapa" -> {
-                            item {
-                                SectionTitle(
-                                    "Mapa de oportunidades",
-                                    "La conexión con ubicaciones y canchas se incorporará en la siguiente etapa."
-                                )
-                            }
-                            item { MapPlaceholder() }
-                            item {
-                                Text(
-                                    "La ubicación exacta de los jugadores nunca será pública. " +
-                                        "Se mostrará una zona aproximada.",
-                                    color = Color.Gray,
-                                    fontSize = 13.sp
-                                )
-                            }
-                        }
-
-                        else -> {
-                            item {
-                                ProfileScreen(
-                                    uid = uid,
-                                    db = db,
-                                    initialName = initialName,
-                                    onNameChanged = onNameChanged
-                                )
-                            }
-                        }
-                    }
-                } else if (role == "Capitán") {
-                    when (page) {
-                        "Buscar" -> {
-                            item {
-                                SectionTitle(
-                                    "Buscar jugadores",
-                                    "Estos resultados son ejemplos de demostración."
-                                )
-                            }
-
-                            items(
-                                listOf(
-                                    "Federico Martínez · Delantero · 800 m",
-                                    "Sofía López · Mediocampista · 1,1 km",
-                                    "Lucas Pérez · Arquero · 1,6 km"
-                                )
-                            ) { player ->
-                                Card(shape = RoundedCornerShape(16.dp)) {
-                                    Row(
-                                        Modifier.fillMaxWidth().padding(14.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Icon(
-                                            Icons.Default.AccountCircle,
-                                            null,
-                                            modifier = Modifier.size(42.dp),
-                                            tint = Forest
-                                        )
-                                        Spacer(Modifier.width(10.dp))
-                                        Text(player, Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
-                                        TextButton(onClick = { approved = true }) {
-                                            Text("Invitar")
-                                        }
-                                    }
-                                }
-                            }
-
-                            if (approved) {
-                                item {
-                                    Text(
-                                        "Invitación simulada.",
-                                        color = Forest,
-                                        fontSize = 12.sp
-                                    )
-                                }
-                            }
-                        }
-
-                        "Solicitudes" -> {
-                            item {
-                                SectionTitle(
-                                    "Postulaciones",
-                                    "Revisá el perfil antes de confirmar un ingreso."
-                                )
-                            }
-
-                            item {
-                                Card(shape = RoundedCornerShape(18.dp)) {
-                                    Column(
-                                        Modifier.padding(16.dp),
-                                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                                    ) {
-                                        Text(
-                                            "Federico Martínez",
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        Text("25 años · Delantero · Disponible ahora · A 800 m")
-                                        if (approved) {
-                                            Text(
-                                                "Jugador aprobado para el equipo",
-                                                color = Forest,
-                                                fontWeight = FontWeight.Bold
-                                            )
-                                        }
-                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            Button(
-                                                onClick = { approved = true },
-                                                modifier = Modifier.weight(1f)
-                                            ) { Text("Aceptar") }
-
-                                            OutlinedButton(
-                                                onClick = { approved = false },
-                                                modifier = Modifier.weight(1f)
-                                            ) { Text("Rechazar") }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        else -> {
-                            item {
-                                SectionTitle(
-                                    "Panel del capitán",
-                                    "Tu equipo, las vacantes y las solicitudes en un solo lugar."
-                                )
-                            }
-                            item { StatRow("4 / 5", "Jugadores confirmados", "Falta 1 jugador") }
-                            item { Text("Partido de hoy · 23:30 · Fútbol 5 · Mixto", fontWeight = FontWeight.SemiBold) }
-                            item {
-                                Button(
-                                    onClick = { page = "Buscar" },
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Icon(Icons.Default.PersonSearch, null)
-                                    Spacer(Modifier.width(8.dp))
-                                    Text("Buscar jugador faltante")
-                                }
-                            }
-                            item {
-                                OutlinedButton(
-                                    onClick = { page = "Solicitudes" },
-                                    modifier = Modifier.fillMaxWidth()
-                                ) { Text("Revisar postulaciones") }
-                            }
-                            item {
-                                Button(
-                                    onClick = { urgent = !urgent },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = Color(0xFFB64A35)
-                                    )
-                                ) {
-                                    Icon(Icons.Default.Campaign, null)
-                                    Spacer(Modifier.width(8.dp))
-                                    Text(if (urgent) "Desactivar búsqueda urgente" else "¡Necesitamos jugadores!")
-                                }
-                            }
-                            if (urgent) {
-                                item {
-                                    Text(
-                                        "Búsqueda urgente simulada.",
-                                        color = Forest,
-                                        fontSize = 12.sp
-                                    )
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    item {
-                        SectionTitle(
-                            "Administración de cancha",
-                            "Panel de gestión de partidos y horarios."
-                        )
-                    }
-                    item { StatRow("6", "Partidos activos", "4 buscan jugadores") }
-                    item { Text("Próximos encuentros", fontWeight = FontWeight.Bold) }
-                    items(sampleMatches) { match ->
-                        MatchCard(match, false, {}, {})
-                    }
-                    item {
-                        Button(
-                            onClick = { page = "Publicar" },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Default.Add, null)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Publicar partido")
-                        }
-                    }
-                    if (page == "Publicar") {
-                        item {
-                            Text(
-                                "El formulario de publicación se conectará a Firebase en la siguiente etapa.",
-                                color = Color.Gray,
-                                fontSize = 12.sp
-                            )
-                        }
-                    }
+            } else if (tab == "Solicitudes") {
+                item { Text("Elegí uno de tus partidos para revisar postulaciones.") }
+                items(matches.filter { it.ownerUid == uid }) { m ->
+                    Button(onClick = { selectedMatch = m }) { Text(m.title) }
                 }
-
-                item {
-                    Spacer(Modifier.height(8.dp))
-                    Text("FÚTBOL CERCA · Cuenta: $role", color = Color.Gray, fontSize = 10.sp)
-                    OutlinedButton(
-                        onClick = onLogout,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(Icons.Default.Logout, null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Cerrar sesión")
-                    }
+                selectedMatch?.let { m ->
+                    item { ApplicationList(m.id, uid, onError) }
                 }
+            } else if (tab == "Equipo" || tab == "Gestión" || tab == "Partidos" || tab == "Mapa") {
+                item { Text(if (role == "Jugador") "Partidos disponibles" else "Partidos publicados", style = MaterialTheme.typography.titleLarge) }
+                items(if (role == "Jugador") matches else matches.filter { it.ownerUid == uid }) { m ->
+                    MatchCard(m, role == "Jugador", uid, name, onError)
+                }
+                if (role != "Jugador") item { Button(onClick = { tab = "Publicar" }, modifier = Modifier.fillMaxWidth()) { Text("Crear partido") } }
+            }
+
+            item {
+                Spacer(Modifier.height(8.dp))
+                Text("Licencias y soporte: CodeMarket", fontWeight = FontWeight.Bold)
+                Text("Prueba gratuita: 7 días. Para solicitar licencia mensual o anual:")
+                Button(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(WHATSAPP))) }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Contactar por WhatsApp · 2615117220")
+                }
+                OutlinedButton(onClick = onLogout, modifier = Modifier.fillMaxWidth()) { Text("Cerrar sesión") }
             }
         }
     }
 }
 
 @Composable
-private fun ProfileScreen(
-    uid: String,
-    db: FirebaseFirestore,
-    initialName: String,
-    onNameChanged: (String) -> Unit
-) {
-    var name by remember { mutableStateOf(initialName) }
-    var age by remember { mutableStateOf("") }
-    var gender by remember { mutableStateOf("Masculino") }
-    var positions by remember { mutableStateOf("") }
-    var skills by remember { mutableStateOf("") }
-    var availability by remember { mutableStateOf("Ahora mismo") }
-    var zone by remember { mutableStateOf("") }
-    var loading by remember { mutableStateOf(true) }
-    var saving by remember { mutableStateOf(false) }
-    var message by remember { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(uid) {
-        db.collection("users").document(uid).get()
-            .addOnSuccessListener { doc ->
-                name = doc.getString("displayName") ?: initialName
-                age = doc.getLong("age")?.toString() ?: ""
-                gender = doc.getString("gender") ?: "Masculino"
-                positions = doc.getString("positions") ?: ""
-                skills = doc.getString("skills") ?: ""
-                availability = doc.getString("availability") ?: "Ahora mismo"
-                zone = doc.getString("zone") ?: ""
-                loading = false
-            }
-            .addOnFailureListener {
-                message = it.localizedMessage ?: "No se pudo cargar el perfil"
-                loading = false
-            }
-    }
-
-    Card(shape = RoundedCornerShape(18.dp)) {
-        Column(
-            Modifier.fillMaxWidth().padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                "Mi perfil deportivo",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                color = Forest
-            )
-            Text(
-                "Completá tus datos para que los equipos puedan conocerte.",
-                color = Color.Gray,
-                fontSize = 13.sp
-            )
-
-            if (loading) {
-                CircularProgressIndicator()
-            } else {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("Nombre completo") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
+private fun PublishMatch(uid: String, owner: String, defaultZone: String, onError: (String) -> Unit) {
+    var title by remember { mutableStateOf("") }
+    var mode by remember { mutableStateOf("Mixto") }
+    var format by remember { mutableStateOf("Fútbol 5") }
+    var date by remember { mutableStateOf("") }
+    var venue by remember { mutableStateOf("") }
+    var zone by remember { mutableStateOf(defaultZone) }
+    var price by remember { mutableStateOf("") }
+    var places by remember { mutableStateOf("1") }
+    Card {
+        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Publicar partido", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            OutlinedTextField(title, { title = it }, label = { Text("Título / convocatoria") }, modifier = Modifier.fillMaxWidth())
+            Text("Modalidad")
+            Row { listOf("Masculino", "Femenino", "Mixto").forEach { FilterChip(mode == it, { mode = it }, label = { Text(it) }) } }
+            Text("Formato")
+            Row { listOf("Fútbol 5", "Fútbol 7").forEach { FilterChip(format == it, { format = it }, label = { Text(it) }) } }
+            OutlinedTextField(date, { date = it }, label = { Text("Fecha y hora (ej. 22/11 20:00)") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(venue, { venue = it }, label = { Text("Cancha / lugar") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(zone, { zone = it }, label = { Text("Zona aproximada") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(price, { price = it }, label = { Text("Costo por jugador (opcional)") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(places, { places = it.filter(Char::isDigit).take(2) }, label = { Text("Jugadores que faltan") }, modifier = Modifier.fillMaxWidth())
+            Button(onClick = {
+                if (title.isBlank() || date.isBlank() || venue.isBlank()) { onError("Completá título, fecha y cancha."); return@Button }
+                val data = hashMapOf<String, Any>(
+                    "title" to title.trim(), "mode" to mode, "format" to format,
+                    "dateTime" to date.trim(), "venue" to venue.trim(), "zone" to zone.trim(),
+                    "price" to price.trim(), "playersNeeded" to (places.toIntOrNull() ?: 1),
+                    "ownerUid" to uid, "ownerName" to owner, "status" to "open",
+                    "createdAt" to Timestamp.now()
                 )
-
-                OutlinedTextField(
-                    value = age,
-                    onValueChange = { age = it.filter(Char::isDigit).take(2) },
-                    label = { Text("Edad") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-
-                Text("Género", fontWeight = FontWeight.SemiBold)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("Masculino", "Femenino").forEach {
-                        FilterChip(
-                            selected = gender == it,
-                            onClick = { gender = it },
-                            label = { Text(it) }
-                        )
-                    }
-                }
-
-                OutlinedTextField(
-                    value = positions,
-                    onValueChange = { positions = it },
-                    label = { Text("Posiciones (ej. arquero, defensor)") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                OutlinedTextField(
-                    value = skills,
-                    onValueChange = { skills = it },
-                    label = { Text("Habilidades y experiencia") },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 2
-                )
-
-                Text("Disponibilidad", fontWeight = FontWeight.SemiBold)
-                listOf("Ahora mismo", "Esta noche", "Mañana", "Fines de semana").forEach {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(
-                            selected = availability == it,
-                            onClick = { availability = it }
-                        )
-                        Text(it)
-                    }
-                }
-
-                OutlinedTextField(
-                    value = zone,
-                    onValueChange = { zone = it },
-                    label = { Text("Zona o barrio (no dirección exacta)") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Button(
-                    onClick = {
-                        if (name.isBlank()) {
-                            message = "Ingresá tu nombre."
-                            return@Button
-                        }
-
-                        saving = true
-                        message = null
-
-                        val data = hashMapOf<String, Any>(
-                            "displayName" to name.trim(),
-                            "gender" to gender,
-                            "positions" to positions.trim(),
-                            "skills" to skills.trim(),
-                            "availability" to availability,
-                            "zone" to zone.trim(),
-                            "profileUpdatedAt" to Timestamp.now()
-                        )
-
-                        age.toIntOrNull()?.let { data["age"] = it }
-
-                        db.collection("users").document(uid)
-                            .set(data, SetOptions.merge())
-                            .addOnSuccessListener {
-                                saving = false
-                                onNameChanged(name.trim())
-                                message = "¡Perfil guardado correctamente!"
-                            }
-                            .addOnFailureListener {
-                                saving = false
-                                message = it.localizedMessage ?: "No se pudo guardar el perfil"
-                            }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !saving
-                ) {
-                    if (saving) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            color = Color.White
-                        )
-                    } else {
-                        Text("Guardar mi perfil")
-                    }
-                }
-
-                message?.let {
-                    Text(
-                        it,
-                        color = if (it.startsWith("¡")) Forest else Color(0xFFB3261E),
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp
-                    )
-                }
-            }
+                db.collection("matches").add(data)
+                    .addOnSuccessListener { onError("Partido publicado correctamente.") }
+                    .addOnFailureListener { onError(it.localizedMessage ?: "No se pudo publicar el partido") }
+            }, modifier = Modifier.fillMaxWidth()) { Text("Publicar") }
         }
     }
 }
 
 @Composable
-private fun MatchCard(
-    match: Match,
-    isApplied: Boolean,
-    onApply: () -> Unit,
-    onWhatsApp: () -> Unit
-) {
-    Card(
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White)
-    ) {
-        Column(
-            Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(9.dp)
-        ) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Surface(
-                    color = Color(0xFFEAF5E3),
-                    shape = RoundedCornerShape(30.dp)
-                ) {
-                    Text(
-                        "FALTAN ${match.missing}",
-                        Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                        color = Forest,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-                Text("A ${match.distance}", color = Color.Gray, fontSize = 12.sp)
+private fun MatchCard(m: MatchItem, allowApply: Boolean, uid: String, playerName: String, onError: (String) -> Unit) {
+    val context = LocalContext.current
+    var already by remember(m.id) { mutableStateOf(false) }
+    LaunchedEffect(m.id, uid) {
+        db.collection("matches").document(m.id).collection("applications").document(uid).get()
+            .addOnSuccessListener { already = it.exists() }
+    }
+    Card {
+        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text(m.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("${m.format} · ${m.mode}")
+            Text("Fecha: ${m.dateTime}")
+            Text("Lugar: ${m.venue} · Zona: ${m.zone}")
+            Text("Organiza: ${m.ownerName}")
+            Text("Costo: ${m.price.ifBlank { "A confirmar" }}")
+            if (allowApply) {
+                Button(enabled = !already, onClick = {
+                    val data = mapOf("uid" to uid, "playerName" to playerName, "status" to "pending", "createdAt" to Timestamp.now())
+                    db.collection("matches").document(m.id).collection("applications").document(uid).set(data)
+                        .addOnSuccessListener { already = true; onError("Postulación enviada.") }
+                        .addOnFailureListener { onError(it.localizedMessage ?: "No se pudo postular") }
+                }, modifier = Modifier.fillMaxWidth()) { Text(if (already) "Ya te postulaste" else "Postularme") }
             }
-
-            Text(
-                match.title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-            Text("${match.format} · ${match.mode}", fontSize = 13.sp)
-            Text(match.time, fontSize = 13.sp)
-            Text(match.place, fontSize = 13.sp)
-
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    "${match.price} por jugador",
-                    color = Forest,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp
-                )
-                if (isApplied) {
-                    Text("Postulado ✓", color = Forest, fontWeight = FontWeight.Bold)
-                }
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = onApply,
-                    modifier = Modifier.weight(1f),
-                    enabled = !isApplied
-                ) {
-                    Text(if (isApplied) "Enviado" else "Postularme")
-                }
-                OutlinedButton(onClick = onWhatsApp) {
-                    Icon(Icons.Default.Share, null)
-                    Spacer(Modifier.width(4.dp))
-                    Text("WhatsApp")
-                }
-            }
+            OutlinedButton(onClick = {
+                val msg = URLEncoder.encode("Hola, me interesa el partido ${m.title} (${m.dateTime}).", "UTF-8")
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/?text=$msg")))
+            }, modifier = Modifier.fillMaxWidth()) { Text("Consultar por WhatsApp") }
         }
     }
 }
 
 @Composable
-private fun SectionTitle(title: String, subtitle: String) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            title,
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
-            color = Ink
-        )
-        Text(subtitle, color = Color.Gray, fontSize = 13.sp)
-    }
-}
-
-@Composable
-private fun StatRow(number: String, label: String, detail: String) {
-    Card(
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = Forest)
-    ) {
-        Row(
-            Modifier.fillMaxWidth().padding(18.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(number, color = Lime, fontSize = 30.sp, fontWeight = FontWeight.Black)
-                Text(label, color = Color.White, fontWeight = FontWeight.SemiBold)
+private fun ApplicationList(matchId: String, ownerUid: String, onError: (String) -> Unit) {
+    var applications by remember(matchId) { mutableStateOf(listOf<Map<String, Any>>()) }
+    DisposableEffect(matchId) {
+        val reg = db.collection("matches").document(matchId).collection("applications")
+            .addSnapshotListener { snap, e ->
+                if (e != null) onError(e.localizedMessage ?: "Error de solicitudes")
+                else applications = snap?.documents.orEmpty().mapNotNull { it.data }
             }
-            Text(detail, color = Color(0xFFD8E6DC), fontSize = 12.sp)
-        }
+        onDispose { reg.remove() }
     }
-}
-
-@Composable
-private fun MapPlaceholder() {
-    Card(
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFFDDE9D7))
-    ) {
-        Box(
-            Modifier.fillMaxWidth().height(230.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Default.Map, null, tint = Forest, modifier = Modifier.size(52.dp))
-                Text("MAPA DE JUGADORES Y CANCHAS", color = Forest, fontWeight = FontWeight.Bold)
-                Text("Integración de mapas en próxima etapa", color = Forest, fontSize = 11.sp)
-            }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Postulaciones", style = MaterialTheme.typography.titleLarge)
+        if (applications.isEmpty()) Text("Todavía no hay postulaciones.")
+        applications.forEach { a ->
+            Card { Column(Modifier.fillMaxWidth().padding(10.dp)) {
+                Text(a["playerName"] as? String ?: "Jugador", fontWeight = FontWeight.Bold)
+                Text("Estado: ${a["status"] ?: "pending"}")
+                val applicant = a["uid"] as? String ?: ""
+                Row {
+                    Button(onClick = {
+                        db.collection("matches").document(matchId).collection("applications").document(applicant)
+                            .update("status", "accepted")
+                            .addOnSuccessListener { onError("Postulación aceptada.") }
+                            .addOnFailureListener { onError(it.localizedMessage ?: "No se pudo aceptar") }
+                    }) { Text("Aceptar") }
+                    Spacer(Modifier.width(8.dp))
+                    OutlinedButton(onClick = {
+                        db.collection("matches").document(matchId).collection("applications").document(applicant)
+                            .update("status", "rejected")
+                            .addOnSuccessListener { onError("Postulación rechazada.") }
+                            .addOnFailureListener { onError(it.localizedMessage ?: "No se pudo rechazar") }
+                    }) { Text("Rechazar") }
+                }
+            } }
         }
     }
 }
