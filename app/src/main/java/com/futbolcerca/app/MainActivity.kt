@@ -140,6 +140,7 @@ private fun AuthScreen(setLoading: (Boolean) -> Unit, showMessage: (String) -> U
 private data class MatchData(val id: String, val title: String, val mode: String, val format: String, val dateLabel: String, val venue: String, val zone: String, val price: String, val ownerUid: String, val ownerName: String, val playersNeeded: Int, val lat: Double?, val lon: Double?)
 private data class PlayerData(val uid: String, val name: String, val zone: String, val positions: String, val availability: String, val lat: Double?, val lon: Double?)
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -> Unit, logout: () -> Unit) {
     val context = LocalContext.current
