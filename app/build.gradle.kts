@@ -4,32 +4,23 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.gms.google-services")
 }
-
 android {
     namespace = "com.futbolcerca.app"
     compileSdk = 35
-
-    // Mantener Java y Kotlin en el mismo objetivo de JVM para evitar
-    // errores de compatibilidad durante compileDebugKotlin.
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-
     defaultConfig {
         applicationId = "com.futbolcerca.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "2.0.0"
     }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
-
-    kotlinOptions {
-        jvmTarget = "17"
-    }
 }
-
 dependencies {
     implementation(platform("com.google.firebase:firebase-bom:34.11.0"))
     implementation("com.google.firebase:firebase-auth")

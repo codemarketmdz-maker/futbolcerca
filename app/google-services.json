@@ -4,26 +4,14 @@
     "project_id": "futbolcerca-e94f0",
     "storage_bucket": "futbolcerca-e94f0.firebasestorage.app"
   },
-  "client": [
-    {
-      "client_info": {
-        "mobilesdk_app_id": "1:181550432408:android:614022bc3c7648349fd0ed",
-        "android_client_info": {
-          "package_name": "com.futbolcerca.app"
-        }
-      },
-      "oauth_client": [],
-      "api_key": [
-        {
-          "current_key": "AIzaSyCDvOSIFQcyHEDuKYkIozDAwjHTI2sUR6U"
-        }
-      ],
-      "services": {
-        "appinvite_service": {
-          "other_platform_oauth_client": []
-        }
-      }
-    }
-  ],
+  "client": [{
+    "client_info": {
+      "mobilesdk_app_id": "1:181550432408:android:614022bc3c7648349fd0ed",
+      "android_client_info": {"package_name": "com.futbolcerca.app"}
+    },
+    "oauth_client": [],
+    "api_key": [{"current_key": "AIzaSyCDvOSIFQcyHEDuKYkIozDAwjHTI2sUR6U"}],
+    "services": {"appinvite_service": {"other_platform_oauth_client": []}}
+  }],
   "configuration_version": "1"
 }
