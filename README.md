@@ -1,6 +1,25 @@
-# Fútbol Cerca 2.3.0
+# Fútbol Cerca 3.1.0
 
 Proyecto Android Kotlin + Jetpack Compose + Firebase Authentication/Firestore + OpenStreetMap (osmdroid).
+
+## Novedades 3.1.0
+- **Valoraciones**: terminado el partido, los confirmados se valoran entre sí (puntualidad y nivel, 1 a 5 estrellas; una vez por persona y partido, no se puede editar). El promedio se ve en el mapa y en Amigos.
+- **Chat del partido** entre el organizador y los confirmados.
+- **Salir de un partido**: el jugador libera su lugar (vuelve una vacante y se avisa al organizador).
+- **Anular partido**: el organizador lo cancela y se avisa a confirmados, postulados e invitados.
+- **Filtros del mapa**: ver jugadores/partidos, formato (F5/F7), cuándo (hoy, mañana, fin de semana) y costo máximo.
+- Los partidos desaparecen de las listas y del mapa 48 h después de su inicio.
+- Reglas nuevas: `ratings`, `messages` y salida de partido (hay que volver a publicar `firestore.rules`).
+
+## Novedades 3.0.0
+- **Roles**: solo *Jugador* y *Capitán / Organizador* (se quitó "dueño de cancha"; las cuentas viejas de cancha pasan a Capitán).
+- **Capitán**: ya no ve una lista de jugadores. Los ve en el mapa como puntos azules dentro de su zona; al tocar uno ve sus datos (y su WhatsApp si lo hizo público) y puede **invitarlo** a un partido suyo. Los jugadores que se postulan aparecen en *Pedidos*.
+- **Red de jugadores**: desde el mapa se puede **seguir** a otro jugador; al aceptar son amigos. Desde *Amigos* se invitan entre sí a postularse a un partido; el invitado lo ve en *Invitaciones → Tus amigos te invitaron*.
+- **Invitación completa**: muestra costo, dirección de la cancha, organizador, vacantes y **quiénes ya están confirmados** en el equipo, con Aceptar / Rechazar.
+- **Avisos**: campana con contador + notificación del teléfono cuando llega una invitación, postulación, confirmación o solicitud de amistad. Con la app abierta o en segundo plano llegan al instante; con la app cerrada se revisan cada ~15 min (WorkManager). El aviso instantáneo con la app cerrada requiere Firebase Cloud Messaging + Cloud Functions (plan Blaze), no incluido.
+- **WhatsApp**: cada usuario puede cargarlo en Perfil y elegir con un interruptor si se muestra a otros (mapa, partidos, equipo). Si está apagado queda guardado solo para él (`users/{uid}/private/contact`).
+- Al publicar un partido se pide la **dirección** de la cancha (solo se muestra la zona en el mapa).
+- Texto bajo el mapa en negrita y color oscuro; textos secundarios más legibles.
 
 ## Novedades 2.3.0
 - Ícono de la app (cancha de fútbol) y recursos `res/` que faltaban.

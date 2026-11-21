@@ -8,11 +8,74 @@ service cloud.firestore {
 
     match /users/{uid} {
       allow create: if signedIn() && request.auth.uid == uid
-        && request.resource.data.role in ['Jugador', 'Capitán', 'Cancha'];
+        && request.resource.data.role in ['Jugador', 'Capitán'];
       allow read: if signedIn();
       allow update: if signedIn() && request.auth.uid == uid
         && request.resource.data.role == resource.data.role;
       allow delete: if false;
+
+      // Datos privados (ej. WhatsApp guardado aunque no se muestre): solo el dueño.
+      match /private/{doc} {
+        allow read, write: if signedIn() && request.auth.uid == uid;
+      }
+
+      // Avisos: cualquiera con sesión puede avisarle a otro; solo el destinatario los lee y marca.
+      match /notifications/{nid} {
+        allow create: if signedIn() && request.resource.data.fromUid == request.auth.uid;
+        allow read, update, delete: if signedIn() && request.auth.uid == uid;
+      }
+
+      // Solicitudes para seguirse (la crea quien quiere seguir; responde el destinatario).
+      match /friendRequests/{fromUid} {
+        allow create: if signedIn() && request.auth.uid == fromUid && fromUid != uid
+          && request.resource.data.fromUid == fromUid
+          && request.resource.data.status == 'pending';
+        allow read: if signedIn() && (request.auth.uid == uid || request.auth.uid == fromUid);
+        allow update: if signedIn() && request.auth.uid == uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'respondedAt'])
+          && request.resource.data.status in ['accepted', 'rejected'];
+        allow delete: if signedIn() && (request.auth.uid == uid || request.auth.uid == fromUid);
+      }
+
+      // Amigos (se crean de a dos, solo al aceptar una solicitud).
+      match /friends/{friendUid} {
+        allow read: if signedIn() && (request.auth.uid == uid || request.auth.uid == friendUid);
+        allow create: if signedIn() && request.resource.data.uid == friendUid && (
+          (request.auth.uid == uid
+            && get(/databases/$(database)/documents/users/$(uid)/friendRequests/$(friendUid)).data.status == 'pending'
+            && getAfter(/databases/$(database)/documents/users/$(uid)/friendRequests/$(friendUid)).data.status == 'accepted')
+          ||
+          (request.auth.uid == friendUid
+            && get(/databases/$(database)/documents/users/$(friendUid)/friendRequests/$(uid)).data.status == 'pending'
+            && getAfter(/databases/$(database)/documents/users/$(friendUid)/friendRequests/$(uid)).data.status == 'accepted')
+        );
+        allow delete: if signedIn() && (request.auth.uid == uid || request.auth.uid == friendUid);
+      }
+
+      // Valoraciones entre jugadores: solo de partidos ya jugados, una por persona y partido, inmodificables.
+      match /ratings/{ratingId} {
+        allow read: if signedIn();
+        allow create: if signedIn() && request.auth.uid != uid
+          && request.resource.data.fromUid == request.auth.uid
+          && ratingId == request.resource.data.matchId + '_' + request.auth.uid
+          && request.resource.data.punctuality in [1, 2, 3, 4, 5]
+          && request.resource.data.level in [1, 2, 3, 4, 5]
+          && get(/databases/$(database)/documents/matches/$(request.resource.data.matchId)).data.eventAt < request.time
+          && exists(/databases/$(database)/documents/matches/$(request.resource.data.matchId)/participants/$(uid))
+          && (isOwner(request.resource.data.matchId)
+              || exists(/databases/$(database)/documents/matches/$(request.resource.data.matchId)/participants/$(request.auth.uid)));
+        allow update, delete: if false;
+      }
+
+      // Un amigo te invita a postularte a un partido.
+      match /matchInvites/{inviteId} {
+        allow create: if signedIn() && request.resource.data.fromUid == request.auth.uid
+          && exists(/databases/$(database)/documents/users/$(uid)/friends/$(request.auth.uid));
+        allow update: if signedIn() && (request.auth.uid == uid
+          || (request.resource.data.fromUid == request.auth.uid && resource.data.fromUid == request.auth.uid
+              && exists(/databases/$(database)/documents/users/$(uid)/friends/$(request.auth.uid))));
+        allow read, delete: if signedIn() && request.auth.uid == uid;
+      }
     }
 
     match /matches/{matchId} {
@@ -37,7 +100,28 @@ service cloud.firestore {
         && !exists(/databases/$(database)/documents/matches/$(matchId)/participants/$(request.auth.uid))
         && existsAfter(/databases/$(database)/documents/matches/$(matchId)/participants/$(request.auth.uid));
 
+      // Un jugador confirmado que se sale libera UNA vacante, solo junto con borrar su registro en "participants".
+      allow update: if signedIn()
+        && resource.data.status in ['open', 'full']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['playersNeeded', 'status'])
+        && request.resource.data.playersNeeded == resource.data.playersNeeded + 1
+        && request.resource.data.status == 'open'
+        && exists(/databases/$(database)/documents/matches/$(matchId)/participants/$(request.auth.uid))
+        && !existsAfter(/databases/$(database)/documents/matches/$(matchId)/participants/$(request.auth.uid));
+
       allow delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
+
+      // Chat del partido: solo organizador y confirmados.
+      match /messages/{msgId} {
+        allow read: if signedIn() && (isOwner(matchId)
+          || exists(/databases/$(database)/documents/matches/$(matchId)/participants/$(request.auth.uid)));
+        allow create: if signedIn() && request.resource.data.uid == request.auth.uid
+          && request.resource.data.text is string && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 500
+          && (isOwner(matchId)
+              || exists(/databases/$(database)/documents/matches/$(matchId)/participants/$(request.auth.uid)));
+        allow delete: if signedIn() && resource.data.uid == request.auth.uid;
+        allow update: if false;
+      }
 
       // Postulaciones: el jugador se postula, el organizador acepta o rechaza.
       match /applications/{playerUid} {
