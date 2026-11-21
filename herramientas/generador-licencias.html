@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Generador de licencias · CodeMarket</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#f3f6f1;color:#123b2d;margin:0;padding:16px}
+main{max-width:620px;margin:auto;background:#fff;border-radius:16px;padding:20px;box-shadow:0 2px 10px #0002}
+h1{font-size:20px;margin:0 0 4px} p.s{color:#4a4a4a;font-size:13px;margin:0 0 16px}
+label{display:block;font-weight:700;margin:14px 0 4px;font-size:14px}
+input,select,textarea,button{font:inherit;width:100%;box-sizing:border-box;padding:10px;border:1px solid #9bb;border-radius:10px}
+button{background:#123b2d;color:#fff;border:0;font-weight:700;margin-top:16px;cursor:pointer}
+button.alt{background:#fff;color:#123b2d;border:1px solid #123b2d;margin-top:8px}
+textarea{height:130px;word-break:break-all;font-family:monospace;font-size:12px}
+.warn{background:#fff3cd;border-radius:10px;padding:10px;font-size:13px;margin-top:16px}
+.err{color:#b00020;font-weight:700;margin-top:10px}
+</style></head><body><main>
+<h1>Generador de licencias · CodeMarket</h1>
+<p class="s">Fútbol Cerca · cada código sirve solo para el celular indicado. Todo ocurre en tu navegador, nada se envía a internet.</p>
+
+<label>1. Clave privada (archivo clave-privada-codemarket.pem)</label>
+<input type="file" id="key" accept=".pem,.txt"><div id="keyok" class="s"></div>
+
+<label>2. ID del celular del cliente (lo ve en Perfil → Licencia)</label>
+<input id="dev" placeholder="ej. 3FA9-12BC-77D0" autocapitalize="characters">
+
+<label>3. Plan</label>
+<select id="plan"><option value="M">Mensual (30 días)</option><option value="T">Trimestral (90 días)</option></select>
+
+<label>4. Fecha de emisión (el cliente tiene 15 días para activarlo)</label>
+<input type="date" id="date">
+
+<button id="go">Generar código</button>
+<div id="err" class="err"></div>
+
+<label>Código para enviar al cliente</label>
+<textarea id="out" readonly></textarea>
+<button class="alt" id="copy">Copiar código</button>
+<button class="alt" id="wa">Abrir WhatsApp con el mensaje</button>
+
+<div class="warn">⚠️ La clave privada es el "secreto" del negocio: quien la tenga puede fabricar licencias. No la subas a GitHub ni la mandes por chat.</div>
+</main>
+<script>
+let pem=null;
+const $=id=>document.getElementById(id);
+// fecha de hoy en Argentina
+$('date').value=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Argentina/Buenos_Aires'}).format(new Date());
+$('key').onchange=async e=>{const f=e.target.files[0];if(!f)return;pem=await f.text();$('keyok').textContent=pem.includes('PRIVATE KEY')?'✓ Clave cargada':'⚠️ Ese archivo no parece una clave privada';};
+async function makeCode(pemText,dev,plan,yyyymmdd){
+  const b64=pemText.replace(/-----[^-]+-----/g,'').replace(/\s+/g,'');
+  const der=Uint8Array.from(atob(b64),c=>c.charCodeAt(0));
+  const key=await crypto.subtle.importKey('pkcs8',der,{name:'ECDSA',namedCurve:'P-256'},false,['sign']);
+  const payload=new TextEncoder().encode('FC1|'+dev+'|'+plan+'|'+yyyymmdd);
+  const sig=new Uint8Array(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},key,payload));
+  const out=new Uint8Array(1+payload.length+sig.length);out[0]=payload.length;out.set(payload,1);out.set(sig,1+payload.length);
+  let s='';out.forEach(b=>s+=String.fromCharCode(b));
+  return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+$('go').onclick=async()=>{
+  $('err').textContent='';$('out').value='';
+  try{
+    if(!pem)throw new Error('Cargá primero la clave privada.');
+    const dev=$('dev').value.trim().toUpperCase();
+    if(!/^[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/.test(dev))throw new Error('El ID debe verse así: 3FA9-12BC-77D0');
+    const d=$('date').value.replace(/-/g,'');if(d.length!==8)throw new Error('Elegí la fecha.');
+    $('out').value=await makeCode(pem,dev,$('plan').value,d);
+  }catch(e){$('err').textContent=e.message||String(e);}
+};
+$('copy').onclick=()=>{$('out').select();navigator.clipboard&&navigator.clipboard.writeText($('out').value);};
+$('wa').onclick=()=>{
+  const msg='Hola! Esta es tu licencia de Fútbol Cerca ('+($('plan').value==='M'?'mensual':'trimestral')+'). En la app: Perfil → Licencia → pegá el código y tocá Activar:\n\n'+$('out').value;
+  open('https://wa.me/?text='+encodeURIComponent(msg),'_blank');
+};
+</script></body></html>

@@ -11,8 +11,8 @@ android {
         applicationId = "com.futbolcerca.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 7
-        versionName = "3.1.0"
+        versionCode = 8
+        versionName = "4.0.0"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

@@ -16,6 +16,7 @@ import android.location.LocationManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.view.MotionEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
@@ -40,7 +41,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
@@ -90,7 +93,7 @@ import kotlin.math.sqrt
 
 private val db get() = FirebaseFirestore.getInstance()
 private val auth get() = FirebaseAuth.getInstance()
-private const val WHATSAPP = "https://wa.me/542615117220"
+private const val WHATSAPP = "https://wa.me/5492615117220"
 private val Green = Color(0xFF123B2D)
 private val Lime = Color(0xFFC6F36B)
 private val Canvas = Color(0xFFF3F6F1)
@@ -125,7 +128,9 @@ private fun Root() {
     when {
         user == null -> AuthScreen({ loading = it }, { message = it })
         loading || profile == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-        else -> Home(user!!.uid, profile!!, { message = it }) { auth.signOut(); profile = null }
+        else -> LicenseHost(user!!.uid, user!!.email ?: "", { message = it }, { auth.signOut(); profile = null }) { license, nowMs, deviceId, onLicense ->
+            Home(user!!.uid, profile!!, license, nowMs, deviceId, user!!.email ?: "", onLicense, { message = it }) { auth.signOut(); profile = null }
+        }
     }
     if (message.isNotBlank()) AlertDialog(onDismissRequest = { message = "" }, title = { Text("Fútbol Cerca") }, text = { Text(message) }, confirmButton = { TextButton(onClick = { message = "" }) { Text("Aceptar") } })
 }
@@ -174,7 +179,7 @@ private fun AuthScreen(setLoading: (Boolean) -> Unit, showMessage: (String) -> U
 }
 
 private data class MatchData(val id: String, val title: String, val mode: String, val format: String, val dateLabel: String, val venue: String, val address: String, val zone: String, val price: String, val ownerUid: String, val ownerName: String, val ownerWhatsapp: String?, val playersNeeded: Int, val status: String, val lat: Double?, val lon: Double?, val zoneLat: Double?, val zoneLon: Double?, val zoneRadius: Double?, val eventAtMs: Long)
-private data class PlayerData(val uid: String, val name: String, val zone: String, val positions: String, val availability: String, val whatsapp: String?, val lat: Double?, val lon: Double?, val zoneLat: Double?, val zoneLon: Double?, val zoneRadius: Double?)
+private data class PlayerData(val uid: String, val name: String, val zone: String, val positions: String, val availability: String, val whatsapp: String?, val lat: Double?, val lon: Double?, val zoneLat: Double?, val zoneLon: Double?, val zoneRadius: Double?, val ratingCount: Long, val punctSum: Long, val levelSum: Long)
 
 // ---------- Zonas en el mapa ----------
 private const val DEFAULT_CITY = "Mendoza"
@@ -183,7 +188,7 @@ private const val MAX_ZONE_RADIUS = 2500.0
 private const val SNAP_DEGREES = 0.004         // ~440 m: el centro del círculo se "redondea" para no delatar una dirección
 
 private data class GeoZone(val lat: Double, val lon: Double, val radius: Double)
-private data class MapItem(val isMatch: Boolean, val id: String, val uid: String?, val title: String, val detail: String, val lat: Double, val lon: Double, val radius: Double, val whatsapp: String?)
+private data class MapItem(val isMatch: Boolean, val id: String, val uid: String?, val title: String, val detail: String, val lat: Double, val lon: Double, val radius: Double, val whatsapp: String?, val rating: String?)
 private data class ZoneCluster(val lat: Double, val lon: Double, val radius: Double, val items: List<MapItem>)
 
 private fun distMeters(aLat: Double, aLon: Double, bLat: Double, bLon: Double): Double {
@@ -309,7 +314,7 @@ private fun openWhatsApp(context: Context, number: String) {
 }
 
 @Composable
-private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -> Unit, logout: () -> Unit) {
+private fun Home(uid: String, initial: Map<String, Any>, license: LicenseStatus, nowMs: Long, deviceId: String, email: String, onLicense: (LicenseStatus) -> Unit, showMessage: (String) -> Unit, logout: () -> Unit) {
     val context = LocalContext.current
     val role = if ((initial["role"] as? String ?: "Jugador") == "Jugador") "Jugador" else "Capitán"
     var tab by remember { mutableStateOf(if (role == "Jugador") "Mapa" else "Partidos") }
@@ -319,6 +324,7 @@ private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -
     var players by remember { mutableStateOf(listOf<PlayerData>()) }
     var friends by remember { mutableStateOf(listOf<FriendRow>()) }
     var notices by remember { mutableStateOf(listOf<Notice>()) }
+    var history by remember { mutableStateOf(listOf<HistoryRow>()) }
     var selectedMatchId by remember { mutableStateOf<String?>(null) }
     var selectedZone by remember { mutableStateOf<ZoneCluster?>(null) }
     var syncError by remember { mutableStateOf<String?>(null) }
@@ -326,8 +332,10 @@ private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -
     val myName = profile["displayName"] as? String ?: "Usuario"
     val myWhatsapp = profile["whatsapp"] as? String
     val friendIds = friends.map { it.uid }.toSet()
+    val selfPlayer = PlayerData(uid, myName, profile["zone"] as? String ?: "", profile["positions"] as? String ?: "", "", myWhatsapp, null, null, null, null, null, (profile["ratingCount"] as? Number)?.toLong() ?: 0L, (profile["punctSum"] as? Number)?.toLong() ?: 0L, (profile["levelSum"] as? Number)?.toLong() ?: 0L)
+    val ratingMap = (players + selfPlayer).mapNotNull { p -> ratingText(p.ratingCount, p.punctSum, p.levelSum)?.let { p.uid to it } }.toMap()
+    val ranking = (players + selfPlayer).filter { it.ratingCount > 0L }.sortedWith(compareByDescending<PlayerData> { ratingScore(it) }.thenByDescending { it.ratingCount }).take(10)
     val unread = notices.count { !it.read }
-    val nowMs = System.currentTimeMillis()
     // Los partidos se ocultan 48 h después de su inicio.
     val matches = allMatches.filter { it.eventAtMs == 0L || it.eventAtMs > nowMs - 48L * 3600_000L }
 
@@ -369,7 +377,7 @@ private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -
         }
         regs += db.collection("users").whereEqualTo("role", "Jugador").addSnapshotListener { snap, e ->
             if (e != null) syncError = "Jugadores: ${e.localizedMessage}" else players = snap?.documents.orEmpty().mapNotNull { d ->
-                if (d.id == uid) null else PlayerData(d.id, d.getString("displayName") ?: "Jugador", d.getString("zone") ?: "Zona no indicada", d.getString("positions") ?: "Sin posición", d.getString("availability") ?: "Sin disponibilidad", d.getString("whatsapp"), d.getDouble("lat"), d.getDouble("lon"), d.getDouble("zoneLat"), d.getDouble("zoneLon"), d.getDouble("zoneRadius"))
+                if (d.id == uid) null else PlayerData(d.id, d.getString("displayName") ?: "Jugador", d.getString("zone") ?: "Zona no indicada", d.getString("positions") ?: "Sin posición", d.getString("availability") ?: "Sin disponibilidad", d.getString("whatsapp"), d.getDouble("lat"), d.getDouble("lon"), d.getDouble("zoneLat"), d.getDouble("zoneLon"), d.getDouble("zoneRadius"), d.getLong("ratingCount") ?: 0L, d.getLong("punctSum") ?: 0L, d.getLong("levelSum") ?: 0L)
             }
         }
         regs += db.collection("users").document(uid).collection("friends").addSnapshotListener { snap, e ->
@@ -384,7 +392,18 @@ private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -
                 }
             }
         }
+        regs += db.collection("users").document(uid).addSnapshotListener { snap, e ->
+            if (e == null && snap != null && snap.exists()) profile = profile + (snap.data ?: emptyMap<String, Any>()).filterKeys { it == "ratingCount" || it == "punctSum" || it == "levelSum" }
+        }
+        regs += db.collection("users").document(uid).collection("history").orderBy("eventAt", Query.Direction.DESCENDING).limit(50).addSnapshotListener { snap, e ->
+            if (e == null) history = snap?.documents.orEmpty().map { HistoryRow(it.id, it.getString("title") ?: "Partido", it.getString("dateLabel") ?: "", it.getString("venue") ?: "", it.getString("zone") ?: "", it.getString("ownerName") ?: "", it.getTimestamp("eventAt")?.toDate()?.time ?: 0L) }
+        }
         onDispose { regs.forEach { it.remove() } }
+    }
+    // Recordatorio unas horas antes de cada partido en el que estoy confirmado o que organizo.
+    LaunchedEffect(history, matches) {
+        history.filter { it.eventAtMs > System.currentTimeMillis() }.forEach { Notifier.scheduleReminder(context, it.id, uid, it.title, it.eventAtMs) }
+        matches.filter { it.ownerUid == uid && it.eventAtMs > System.currentTimeMillis() }.forEach { Notifier.scheduleReminder(context, it.id, uid, it.title, it.eventAtMs) }
     }
     val tabs = if (role == "Jugador") listOf("Mapa", "Partidos", "Invitaciones", "Amigos", "Perfil") else listOf("Partidos", "Mapa", "Solicitudes", "Publicar", "Perfil")
     fun tabLabel(t: String) = when (t) { "Solicitudes" -> "Pedidos"; "Publicar" -> "Crear"; "Invitaciones" -> "Invitac."; else -> t }
@@ -392,15 +411,26 @@ private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -
         modifier = Modifier.imePadding(),
         containerColor = Canvas,
         topBar = {
-            CenterAlignedTopAppBar(
-                title = { Row(verticalAlignment = Alignment.CenterVertically) { Icon(painterResource(R.drawable.ic_cancha), null, tint = Color.Unspecified, modifier = Modifier.size(28.dp)); Spacer(Modifier.width(8.dp)); Text("FÚTBOL CERCA", fontWeight = FontWeight.Black, color = Color.White, maxLines = 1) } },
-                actions = {
-                    IconButton(onClick = { tab = "Avisos" }) {
-                        BadgedBox(badge = { if (unread > 0) Badge { Text("$unread") } }) { Icon(Icons.Default.Notifications, "Avisos", tint = Color.White) }
+            val paid = license.licenseUntil > nowMs
+            val left = (if (paid) license.licenseUntil else license.trialEnd) - nowMs
+            val licenseHeader = when {
+                left <= 0L -> "⛔ Licencia vencida"
+                paid -> "🔑 Licencia: quedan ${License.remaining(left)}"
+                else -> "🎁 Prueba gratis: quedan ${License.remaining(left)}"
+            }
+            Surface(color = Green) {
+                Column(Modifier.statusBarsPadding().padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(painterResource(R.drawable.ic_cancha), null, tint = Color.Unspecified, modifier = Modifier.size(28.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("FÚTBOL CERCA", fontWeight = FontWeight.Black, color = Color.White, maxLines = 1, modifier = Modifier.weight(1f))
+                        IconButton(onClick = { tab = "Avisos" }) {
+                            BadgedBox(badge = { if (unread > 0) Badge { Text("$unread") } }) { Icon(Icons.Default.Notifications, "Avisos", tint = Color.White) }
+                        }
                     }
-                },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Green)
-            )
+                    Text(licenseHeader, color = if (left < 3L * 24 * 3600_000L) Color(0xFFFFD54F) else Lime, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { tab = "Perfil" })
+                }
+            }
         },
         bottomBar = {
             if (!imeVisible) NavigationBar(containerColor = Color.White) {
@@ -437,12 +467,17 @@ private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -
                             }
                         }
                     }
+                    item { Text("☝️ Un dedo desplaza la pantalla · ✌️ dos dedos mueven y acercan el mapa.", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1B1B1B)) }
                     item { Text(if (role == "Capitán") "Cada círculo es una zona y cada punto azul un jugador. Tocá un punto para ver sus datos e invitarlo a tu partido." else "Cada círculo es una zona: puntos azules son jugadores y naranjas partidos. Tocá un punto para ver sus datos; podés seguir a otros jugadores. Nunca se muestra una dirección exacta.", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1B1B1B)) }
                 }
-                "Perfil" -> item { ProfileEditor(uid, profile, { profile = it }, showMessage) }
+                "Perfil" -> {
+                    item { ProfileEditor(uid, profile, { profile = it }, showMessage) }
+                    item { LicensePanel(deviceId, email, license, nowMs, showMessage, onLicense) }
+                    item { MyMatchesHistory(history, nowMs) }
+                }
                 "Avisos" -> item { NotificationsScreen(uid, notices) }
-                "Invitaciones" -> item { PlayerInvitations(matches, uid, myName, myWhatsapp, showMessage) }
-                "Amigos" -> item { FriendsScreen(uid, myName, friends, players, matches, showMessage) }
+                "Invitaciones" -> item { PlayerInvitations(matches, uid, myName, myWhatsapp, ratingMap, showMessage) }
+                "Amigos" -> item { FriendsScreen(uid, myName, friends, players, matches, ranking, showMessage) }
                 "Publicar" -> item { PublishForm(uid, profile, showMessage) }
                 "Solicitudes" -> {
                     val ownMatches = matches.filter { it.ownerUid == uid }
@@ -455,11 +490,11 @@ private fun Home(uid: String, initial: Map<String, Any>, showMessage: (String) -
                     item { Text(if (role == "Jugador") "Partidos disponibles" else "Mis partidos publicados", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
                     val visible = if (role == "Jugador") matches else matches.filter { it.ownerUid == uid }
                     if (visible.isEmpty()) item { EmptyState("Todavía no hay partidos publicados", "Cuando alguien publique un encuentro, aparecerá acá.") }
-                    items(visible, key = { it.id }) { m -> MatchCard(m, role == "Jugador", uid, myName, myWhatsapp, showMessage) }
+                    items(visible, key = { it.id }) { m -> MatchCard(m, role == "Jugador", uid, myName, myWhatsapp, ratingMap, showMessage) }
                     if (role != "Jugador") item { Button(onClick = { tab = "Publicar" }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Add, null); Spacer(Modifier.width(8.dp)); Text("Crear partido") } }
                 }
             }
-            item { Divider(); Text("CodeMarket · Licencias y soporte", color = Color(0xFF4A4A4A), fontSize = 12.sp); OutlinedButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(WHATSAPP))) }, modifier = Modifier.fillMaxWidth()) { Text("WhatsApp 2615117220") }; TextButton(onClick = logout) { Text("Cerrar sesión") } }
+            item { Divider(); CreatorCard(); TextButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Text("Cerrar sesión") } }
         }
     }
 }
@@ -471,16 +506,16 @@ private fun InAppMap(players: List<PlayerData>, matches: List<MatchData>, onSele
         val items = mutableListOf<MapItem>()
         players.forEach { p ->
             val lat = p.zoneLat ?: p.lat; val lon = p.zoneLon ?: p.lon
-            if (lat != null && lon != null) items += MapItem(false, p.uid, p.uid, p.name, "${p.zone} · ${p.positions} · ${p.availability}", lat, lon, p.zoneRadius ?: 700.0, p.whatsapp)
+            if (lat != null && lon != null) items += MapItem(false, p.uid, p.uid, p.name, "${p.zone} · ${p.positions} · ${p.availability}", lat, lon, p.zoneRadius ?: 700.0, p.whatsapp, ratingText(p.ratingCount, p.punctSum, p.levelSum))
         }
         matches.forEach { m ->
             val lat = m.zoneLat ?: m.lat; val lon = m.zoneLon ?: m.lon
-            if (lat != null && lon != null) items += MapItem(true, m.id, null, m.title, "${m.dateLabel} · ${m.venue} · ${m.zone}", lat, lon, m.zoneRadius ?: 700.0, m.ownerWhatsapp)
+            if (lat != null && lon != null) items += MapItem(true, m.id, null, m.title, "${m.dateLabel} · ${m.venue} · ${m.zone}", lat, lon, m.zoneRadius ?: 700.0, m.ownerWhatsapp, null)
         }
         buildZones(items)
     }
     AndroidView(modifier = Modifier.fillMaxWidth().height(380.dp), factory = {
-        MapView(it).apply { setOnTouchListener { v, _ -> v.parent?.requestDisallowInterceptTouchEvent(true); false }; setTileSource(TileSourceFactory.MAPNIK); setMultiTouchControls(true); controller.setZoom(12.5); controller.setCenter(GeoPoint(-32.8895, -68.8458)) }
+        TwoFingerMapView(it).apply { setTileSource(TileSourceFactory.MAPNIK); setMultiTouchControls(true); controller.setZoom(12.5); controller.setCenter(GeoPoint(-32.8895, -68.8458)) }
     }, update = { map ->
         map.overlays.clear()
         zones.forEach { z ->
@@ -537,7 +572,7 @@ private fun ZoneDetail(zone: ZoneCluster, onClose: () -> Unit, playerActions: @C
         zone.items.forEach { item ->
             Text("${if (item.isMatch) "⚽ Partido" else "👤 Jugador"}: ${item.title}", fontWeight = FontWeight.Bold)
             Text(item.detail, color = Color(0xFF333333), fontSize = 13.sp)
-            if (!item.isMatch && item.uid != null && zone.items.size <= 6) RatingBadge(item.uid)
+            item.rating?.let { Text(it, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF1B1B1B)) }
             item.whatsapp?.let { w -> WhatsAppButton(w, if (item.isMatch) "Escribir al organizador" else "WhatsApp") }
             if (!item.isMatch) playerActions(item)
             Divider()
@@ -739,7 +774,7 @@ private fun PublishForm(uid: String, profile: Map<String, Any>, showMessage: (St
 }
 
 @Composable
-private fun MatchCard(m: MatchData, canApply: Boolean, uid: String, playerName: String, playerWhatsapp: String?, showMessage: (String) -> Unit) {
+private fun MatchCard(m: MatchData, canApply: Boolean, uid: String, playerName: String, playerWhatsapp: String?, ratingOf: Map<String, String>, showMessage: (String) -> Unit) {
     var appStatus by remember(m.id) { mutableStateOf<String?>(null) }
     var joined by remember(m.id) { mutableStateOf(false) }
     var showChat by remember(m.id) { mutableStateOf(false) }
@@ -761,6 +796,7 @@ private fun MatchCard(m: MatchData, canApply: Boolean, uid: String, playerName: 
         Text("💰 Costo por jugador: ${m.price.ifBlank { "A confirmar" }}")
         Text("Organiza: ${m.ownerName}")
         m.ownerWhatsapp?.let { WhatsAppButton(it, "Escribir al organizador") }
+        if (canApply) ConfirmedList(m.id, ratingOf)
         if (canApply) {
             val label = when {
                 joined || appStatus == "accepted" -> "✓ Confirmado en este partido"
@@ -814,6 +850,9 @@ private fun joinMatch(matchId: String, playerUid: String, playerName: String, pl
             if (!playerWhatsapp.isNullOrBlank()) person["whatsapp"] = playerWhatsapp
             tx.set(partRef, person)
             tx.update(matchRef, mapOf("playersNeeded" to left, "status" to if (left <= 0L) "full" else "open"))
+            val hist = hashMapOf<String, Any>("matchId" to matchId, "title" to (match.getString("title") ?: "Partido"), "dateLabel" to (match.getString("dateLabel") ?: ""), "venue" to (match.getString("venue") ?: ""), "zone" to (match.getString("zone") ?: ""), "ownerName" to (match.getString("ownerName") ?: ""), "joinedAt" to Timestamp.now())
+            match.getTimestamp("eventAt")?.let { hist["eventAt"] = it }
+            tx.set(db.collection("users").document(playerUid).collection("history").document(matchId), hist)
         }
         tx.update(responseRef, responseFields)
         true
@@ -902,7 +941,7 @@ private fun MatchManagement(m: MatchData, showMessage: (String) -> Unit) {
 }
 
 @Composable
-private fun InvitationCard(match: MatchData, uid: String, playerName: String, playerWhatsapp: String?, showMessage: (String) -> Unit) {
+private fun InvitationCard(match: MatchData, uid: String, playerName: String, playerWhatsapp: String?, ratingOf: Map<String, String>, showMessage: (String) -> Unit) {
     var team by remember(match.id) { mutableStateOf(listOf<AppRow>()) }
     DisposableEffect(match.id) {
         val reg = db.collection("matches").document(match.id).collection("participants").addSnapshotListener { snap, e ->
@@ -920,7 +959,7 @@ private fun InvitationCard(match: MatchData, uid: String, playerName: String, pl
             match.ownerWhatsapp?.let { WhatsAppButton(it, "Escribir al organizador") }
             Text("Ya confirmados en el equipo (${team.size})", fontWeight = FontWeight.Bold)
             if (team.isEmpty()) Text("Todavía no hay nadie confirmado. ¡Serías el primero!", color = Color(0xFF4A4A4A))
-            team.forEach { p -> Row(verticalAlignment = Alignment.CenterVertically) { Text("✓ ${p.name}", Modifier.weight(1f)); p.whatsapp?.let { WhatsAppButton(it, "Chat") } } }
+            team.forEach { p -> Row(verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("✓ ${p.name}", fontWeight = FontWeight.SemiBold); ratingOf[p.uid]?.let { Text(it, fontSize = 12.sp, color = Color(0xFF4A4A4A)) } }; p.whatsapp?.let { WhatsAppButton(it, "Chat") } } }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 Button(enabled = match.status == "open", onClick = {
                     val ref = db.collection("matches").document(match.id).collection("invitations").document(uid)
@@ -940,7 +979,7 @@ private fun InvitationCard(match: MatchData, uid: String, playerName: String, pl
 }
 
 @Composable
-private fun PlayerInvitations(matches: List<MatchData>, uid: String, playerName: String, playerWhatsapp: String?, showMessage: (String) -> Unit) {
+private fun PlayerInvitations(matches: List<MatchData>, uid: String, playerName: String, playerWhatsapp: String?, ratingOf: Map<String, String>, showMessage: (String) -> Unit) {
     var statuses by remember { mutableStateOf(mapOf<String, String>()) }
     var friendInvites by remember { mutableStateOf(listOf<FriendInvite>()) }
     val ids = matches.map { it.id }
@@ -963,7 +1002,7 @@ private fun PlayerInvitations(matches: List<MatchData>, uid: String, playerName:
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Invitaciones de organizadores", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         if (pending.isEmpty()) Text("Todavía no tenés invitaciones pendientes.", color = Color(0xFF4A4A4A))
-        pending.forEach { match -> InvitationCard(match, uid, playerName, playerWhatsapp, showMessage) }
+        pending.forEach { match -> InvitationCard(match, uid, playerName, playerWhatsapp, ratingOf, showMessage) }
 
         Text("Tus amigos te invitaron", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         if (friendInvites.isEmpty()) Text("Cuando un amigo te sugiera un partido, aparece acá.", color = Color(0xFF4A4A4A))
@@ -1014,7 +1053,7 @@ private fun PlayerInvitations(matches: List<MatchData>, uid: String, playerName:
 }
 
 @Composable
-private fun FriendsScreen(uid: String, myName: String, friends: List<FriendRow>, players: List<PlayerData>, matches: List<MatchData>, showMessage: (String) -> Unit) {
+private fun FriendsScreen(uid: String, myName: String, friends: List<FriendRow>, players: List<PlayerData>, matches: List<MatchData>, ranking: List<PlayerData>, showMessage: (String) -> Unit) {
     var requests by remember { mutableStateOf(listOf<AppRow>()) }
     DisposableEffect(uid) {
         val reg = db.collection("users").document(uid).collection("friendRequests").whereEqualTo("status", "pending").addSnapshotListener { snap, e ->
@@ -1061,7 +1100,7 @@ private fun FriendsScreen(uid: String, myName: String, friends: List<FriendRow>,
             Card { Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(f.name, fontWeight = FontWeight.Bold)
                 info?.let { Text("${it.zone} · ${it.positions} · ${it.availability}", color = Color(0xFF333333), fontSize = 13.sp) }
-                RatingBadge(f.uid)
+                info?.let { ratingText(it.ratingCount, it.punctSum, it.levelSum) }?.let { Text(it, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF1B1B1B)) }
                 info?.whatsapp?.let { WhatsAppButton(it) }
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Button(onClick = { expanded = !expanded }) { Text(if (expanded) "Cerrar" else "Invitar a un partido") }
@@ -1085,6 +1124,7 @@ private fun FriendsScreen(uid: String, myName: String, friends: List<FriendRow>,
                 }
             } }
         }
+        RankingSection(ranking, uid)
     }
 }
 
@@ -1225,22 +1265,6 @@ private fun StarPicker(value: Int, onChange: (Int) -> Unit) {
 }
 
 @Composable
-private fun RatingBadge(userUid: String) {
-    var text by remember(userUid) { mutableStateOf<String?>(null) }
-    LaunchedEffect(userUid) {
-        db.collection("users").document(userUid).collection("ratings").limit(100).get().addOnSuccessListener { s ->
-            val n = s.size()
-            text = if (n == 0) "Sin valoraciones todavía" else {
-                val p = s.documents.mapNotNull { it.getLong("punctuality") }.average()
-                val l = s.documents.mapNotNull { it.getLong("level") }.average()
-                String.format(Locale.US, "⭐ Puntualidad %.1f · Nivel %.1f (%d valoraciones)", p, l, n)
-            }
-        }
-    }
-    text?.let { Text(it, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF1B1B1B)) }
-}
-
-@Composable
 private fun RateRow(matchId: String, myUid: String, myName: String, target: AppRow, alreadyRated: Boolean, showMessage: (String) -> Unit) {
     var punctuality by remember(target.uid) { mutableStateOf(0) }
     var level by remember(target.uid) { mutableStateOf(0) }
@@ -1253,7 +1277,12 @@ private fun RateRow(matchId: String, myUid: String, myName: String, target: AppR
             Text("Nivel de juego", fontSize = 12.sp); StarPicker(level) { level = it }
             Button(enabled = punctuality > 0 && level > 0, onClick = {
                 val data = mapOf("fromUid" to myUid, "fromName" to myName, "matchId" to matchId, "punctuality" to punctuality, "level" to level, "createdAt" to Timestamp.now())
-                db.collection("users").document(target.uid).collection("ratings").document("${matchId}_$myUid").set(data)
+                val ratingId = "${matchId}_$myUid"
+                val userRef = db.collection("users").document(target.uid)
+                val batch = db.batch()
+                batch.set(userRef.collection("ratings").document(ratingId), data)
+                batch.update(userRef, mapOf("ratingCount" to FieldValue.increment(1L), "punctSum" to FieldValue.increment(punctuality.toLong()), "levelSum" to FieldValue.increment(level.toLong()), "lastRatingId" to ratingId))
+                batch.commit()
                     .addOnSuccessListener { sent = true; showMessage("Valoración enviada.") }
                     .addOnFailureListener { showMessage("No se pudo valorar: ${it.localizedMessage}") }
             }) { Text("Enviar valoración") }
@@ -1297,6 +1326,7 @@ private fun leaveMatch(m: MatchData, uid: String, name: String, showMessage: (St
         if (part.exists()) {
             val needed = match.getLong("playersNeeded") ?: 0L
             tx.delete(partRef)
+            tx.delete(db.collection("users").document(uid).collection("history").document(m.id))
             tx.update(matchRef, mapOf("playersNeeded" to needed + 1L, "status" to "open"))
             if (app.exists()) tx.delete(appRef)
         }
@@ -1314,4 +1344,213 @@ private fun cancelMatch(m: MatchData, notify: Set<String>, showMessage: (String)
             showMessage("Partido anulado. Avisamos a ${notify.size} personas.")
         }
         .addOnFailureListener { showMessage("No se pudo anular: ${it.localizedMessage}") }
+}
+
+// ---------- Licencia ----------
+@Composable
+private fun LicenseHost(uid: String, email: String, showMessage: (String) -> Unit, logout: () -> Unit, content: @Composable (LicenseStatus, Long, String, (LicenseStatus) -> Unit) -> Unit) {
+    val ctx = LocalContext.current
+    val deviceId = remember { License.deviceId(ctx) }
+    var status by remember { mutableStateOf<LicenseStatus?>(null) }
+    var failed by remember { mutableStateOf<String?>(null) }
+    var attempt by remember { mutableStateOf(0) }
+    var nowMs by remember { mutableStateOf(License.now(ctx)) }
+    LaunchedEffect(Unit) { while (true) { nowMs = License.now(ctx); delay(30_000) } }
+    LaunchedEffect(uid, attempt) {
+        failed = null
+        val devRef = db.collection("devices").document(deviceId)
+        val userRef = db.collection("users").document(uid)
+        // Hora del servidor: evita ganar días cambiando el reloj del teléfono.
+        userRef.set(mapOf("lastSeen" to FieldValue.serverTimestamp()), SetOptions.merge()).addOnSuccessListener {
+            userRef.get().addOnSuccessListener { s -> s.getTimestamp("lastSeen")?.toDate()?.time?.let { License.setServerTime(ctx, it); nowMs = License.now(ctx) } }
+        }
+        fun finish(startMs: Long) { License.saveTrialStart(ctx, startMs); status = License.status(ctx, startMs) }
+        devRef.get().addOnSuccessListener { snap ->
+            if (snap.exists()) finish(snap.getTimestamp("trialStartedAt")?.toDate()?.time ?: System.currentTimeMillis())
+            else devRef.set(mapOf("trialStartedAt" to FieldValue.serverTimestamp(), "createdBy" to uid))
+                .addOnSuccessListener {
+                    devRef.get().addOnSuccessListener { s2 -> finish(s2.getTimestamp("trialStartedAt")?.toDate()?.time ?: System.currentTimeMillis()) }
+                        .addOnFailureListener { finish(System.currentTimeMillis()) }
+                }
+                .addOnFailureListener { e -> failed = "No se pudo iniciar la prueba gratis: ${e.localizedMessage}" }
+        }.addOnFailureListener { e ->
+            val cached = License.cachedTrialStart(ctx)
+            if (cached > 0L) finish(cached) else failed = "No se pudo verificar la licencia: ${e.localizedMessage}. Conectate a internet y reintentá."
+        }
+    }
+    val st = status
+    when {
+        failed != null -> Column(Modifier.fillMaxSize().background(Canvas).systemBarsPadding().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(failed ?: "", textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            Spacer(Modifier.height(12.dp))
+            Button(onClick = { attempt++ }) { Text("Reintentar") }
+            TextButton(onClick = logout) { Text("Cerrar sesión") }
+        }
+        st == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+        nowMs >= st.until -> LicenseExpiredScreen(deviceId, email, st, nowMs, showMessage, { status = it }, logout)
+        else -> content(st, nowMs, deviceId) { status = it }
+    }
+}
+
+@Composable
+private fun LicenseExpiredScreen(deviceId: String, email: String, status: LicenseStatus, nowMs: Long, showMessage: (String) -> Unit, onChanged: (LicenseStatus) -> Unit, logout: () -> Unit) {
+    Column(Modifier.fillMaxSize().background(Canvas).systemBarsPadding().imePadding().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Surface(color = Green, shape = RoundedCornerShape(22.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(painterResource(R.drawable.ic_cancha), null, tint = Color.Unspecified, modifier = Modifier.size(56.dp))
+                Text(if (status.licenseUntil > 0L) "Tu licencia venció" else "Terminó tu prueba gratis", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Black)
+                Text("Activá una licencia mensual o trimestral para seguir usando Fútbol Cerca.", color = Color.White.copy(alpha = .85f), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            }
+        }
+        LicensePanel(deviceId, email, status, nowMs, showMessage, onChanged)
+        CreatorCard()
+        TextButton(onClick = logout, modifier = Modifier.fillMaxWidth()) { Text("Cerrar sesión") }
+    }
+}
+
+@Composable
+private fun LicensePanel(deviceId: String, email: String, status: LicenseStatus, nowMs: Long, showMessage: (String) -> Unit, onChanged: (LicenseStatus) -> Unit) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    var plan by remember { mutableStateOf("T") }
+    var code by remember { mutableStateOf("") }
+    // Precios por defecto; se pueden cambiar sin recompilar en Firestore: config/license { monthly, quarterly }
+    var monthly by remember { mutableStateOf("\$5.000") }
+    var quarterly by remember { mutableStateOf("\$12.000") }
+    LaunchedEffect(Unit) {
+        db.collection("config").document("license").get().addOnSuccessListener { d ->
+            d.getString("monthly")?.let { monthly = it }; d.getString("quarterly")?.let { quarterly = it }
+        }
+    }
+    val paid = status.licenseUntil > nowMs
+    val statusLine = when {
+        paid -> "✅ Licencia activa · quedan ${License.remaining(status.licenseUntil - nowMs)} (vence ${License.formatDate(status.licenseUntil)})"
+        status.trialEnd > nowMs -> "🎁 Prueba gratis · quedan ${License.remaining(status.trialEnd - nowMs)} (hasta ${License.formatDate(status.trialEnd)})"
+        else -> "⛔ Sin licencia activa"
+    }
+    Card(shape = RoundedCornerShape(22.dp)) { Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("🔑 Licencia", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text(statusLine, fontWeight = FontWeight.Bold, color = Color(0xFF1B1B1B))
+        Text("Elegí tu plan (${License.TRIAL_DAYS} días de prueba gratis al instalar):", fontWeight = FontWeight.SemiBold)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FilterChip(plan == "M", { plan = "M" }, label = { Text("Mensual · $monthly") })
+            FilterChip(plan == "T", { plan = "T" }, label = { Text("Trimestral · $quarterly") })
+        }
+        Text("1) Tocá \"Pedir licencia\" y pagá a CodeMarket por WhatsApp.\n2) Te enviamos un código hecho para ESTE celular.\n3) Pegalo abajo y tocá \"Activar licencia\".", fontSize = 13.sp, color = Color(0xFF333333))
+        Text("ID de este celular: $deviceId", fontWeight = FontWeight.Bold, color = Color(0xFF1B1B1B))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Button(onClick = {
+                val price = if (plan == "M") monthly else quarterly
+                val msg = "Hola CodeMarket! Quiero la licencia ${if (plan == "M") "mensual" else "trimestral"} de Fútbol Cerca ($price).\nID de mi celular: $deviceId\nMi cuenta: $email"
+                try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("$WHATSAPP?text=" + URLEncoder.encode(msg, "UTF-8").replace("+", "%20")))) } catch (_: Exception) { }
+            }) { Text("Pedir licencia por WhatsApp") }
+            OutlinedButton(onClick = { clipboard.setText(AnnotatedString(deviceId)); showMessage("ID copiado: $deviceId") }) { Text("Copiar ID") }
+        }
+        OutlinedTextField(code, { code = it }, label = { Text("Pegá acá tu código de licencia") }, minLines = 2, modifier = Modifier.fillMaxWidth())
+        Button(enabled = code.isNotBlank(), onClick = {
+            val (ok, msg) = License.activate(context, code)
+            showMessage(msg)
+            if (ok) { code = ""; onChanged(status.copy(licenseUntil = License.licenseUntil(context))) }
+        }, modifier = Modifier.fillMaxWidth()) { Text("Activar licencia") }
+    } }
+}
+
+@Composable
+private fun CreatorCard() {
+    val context = LocalContext.current
+    Card(colors = CardDefaults.cardColors(containerColor = Green), shape = RoundedCornerShape(18.dp)) {
+        Column(Modifier.fillMaxWidth().padding(14.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Desarrollada por", color = Color.White.copy(alpha = .8f), fontSize = 12.sp)
+            Text("CodeMarket", color = Lime, fontWeight = FontWeight.Black, fontSize = 22.sp)
+            Text("Licencias, soporte y desarrollo de apps a medida", color = Color.White, fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            Button(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(WHATSAPP))) }, colors = ButtonDefaults.buttonColors(containerColor = Lime, contentColor = Green)) {
+                Icon(Icons.Default.Chat, null); Spacer(Modifier.width(6.dp)); Text("WhatsApp 261 511-7220", fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+// ---------- Mapa: un dedo mueve la pantalla, dos dedos mueven el mapa ----------
+private class TwoFingerMapView(context: Context) : MapView(context) {
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> parent?.requestDisallowInterceptTouchEvent(false)
+            MotionEvent.ACTION_POINTER_DOWN -> parent?.requestDisallowInterceptTouchEvent(true)
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> parent?.requestDisallowInterceptTouchEvent(false)
+        }
+        // Con un solo dedo arrastrando, el mapa no se mueve: se desplaza la pantalla.
+        if (ev.pointerCount == 1 && ev.actionMasked == MotionEvent.ACTION_MOVE) return false
+        return super.dispatchTouchEvent(ev)
+    }
+}
+
+// ---------- Valoraciones, ranking e historial ----------
+private fun ratingText(count: Long, punctSum: Long, levelSum: Long): String? {
+    if (count <= 0L) return null
+    return String.format(Locale.US, "⭐ Puntualidad %.1f · Nivel %.1f (%d)", punctSum.toDouble() / count, levelSum.toDouble() / count, count)
+}
+
+private fun ratingScore(p: PlayerData): Double = if (p.ratingCount <= 0L) 0.0 else (p.punctSum + p.levelSum).toDouble() / (2.0 * p.ratingCount)
+
+@Composable
+private fun RankingSection(ranking: List<PlayerData>, myUid: String) {
+    Text("🏆 Ranking de jugadores", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+    Text("Según las valoraciones de puntualidad y nivel que dejan sus compañeros.", fontSize = 13.sp, color = Color(0xFF333333))
+    if (ranking.isEmpty()) Text("Todavía no hay valoraciones. Después de cada partido, valorá a tus compañeros.", color = Color(0xFF4A4A4A))
+    ranking.forEachIndexed { i, p ->
+        Card(colors = CardDefaults.cardColors(containerColor = if (p.uid == myUid) Color(0xFFE7F4DD) else Color.White)) {
+            Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(when (i) { 0 -> "🥇"; 1 -> "🥈"; 2 -> "🥉"; else -> "#${i + 1}" }, fontSize = 20.sp, modifier = Modifier.width(44.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(if (p.uid == myUid) "${p.name} (vos)" else p.name, fontWeight = FontWeight.Bold)
+                    Text("${p.zone} · ${p.positions}", fontSize = 12.sp, color = Color(0xFF4A4A4A))
+                }
+                Text(String.format(Locale.US, "%.1f ⭐", ratingScore(p)), fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+private data class HistoryRow(val id: String, val title: String, val dateLabel: String, val venue: String, val zone: String, val owner: String, val eventAtMs: Long)
+
+@Composable
+private fun MyMatchesHistory(history: List<HistoryRow>, nowMs: Long) {
+    val played = history.count { it.eventAtMs in 1..nowMs }
+    val next = history.count { it.eventAtMs > nowMs }
+    Card(shape = RoundedCornerShape(22.dp)) { Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("📒 Mis partidos", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text("Jugados: $played · Próximos: $next", fontWeight = FontWeight.SemiBold)
+        if (history.isEmpty()) Text("Cuando te confirmen en un partido aparece acá.", color = Color(0xFF4A4A4A))
+        history.forEach { h ->
+            val done = h.eventAtMs in 1..nowMs
+            Text("${if (done) "✓ Jugado" else "⏳ Próximo"} · ${h.title}", fontWeight = FontWeight.Bold)
+            Text("${h.dateLabel} · ${listOf(h.venue, h.zone).filter { it.isNotBlank() }.joinToString(" · ")} · Organiza ${h.owner}", fontSize = 12.sp, color = Color(0xFF4A4A4A))
+        }
+    } }
+}
+
+/** Quiénes ya están confirmados en un partido (para decidir si te postulás). */
+@Composable
+private fun ConfirmedList(matchId: String, ratingOf: Map<String, String>) {
+    var team by remember(matchId) { mutableStateOf(listOf<AppRow>()) }
+    var open by remember(matchId) { mutableStateOf(true) }
+    DisposableEffect(matchId) {
+        val reg = db.collection("matches").document(matchId).collection("participants").addSnapshotListener { snap, e ->
+            if (e == null) team = snap?.documents.orEmpty().map { AppRow(it.id, it.getString("name") ?: "Jugador", "accepted") }
+        }
+        onDispose { reg.remove() }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("👥 Ya confirmados (${team.size})", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            TextButton(onClick = { open = !open }) { Text(if (open) "Ocultar" else "Ver") }
+        }
+        if (open) {
+            if (team.isEmpty()) Text("Todavía no hay nadie confirmado. ¡Serías el primero!", color = Color(0xFF4A4A4A), fontSize = 13.sp)
+            team.forEach { p ->
+                Text("✓ ${p.name}", fontWeight = FontWeight.SemiBold)
+                ratingOf[p.uid]?.let { Text(it, fontSize = 12.sp, color = Color(0xFF4A4A4A)) }
+            }
+        }
+    }
 }

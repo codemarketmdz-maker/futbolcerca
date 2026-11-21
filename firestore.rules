@@ -14,6 +14,25 @@ service cloud.firestore {
         && request.resource.data.role == resource.data.role;
       allow delete: if false;
 
+      // Quien valora a otro suma su valoración al promedio (solo junto al documento de valoración, mismo lote).
+      allow update: if signedIn() && request.auth.uid != uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ratingCount', 'punctSum', 'levelSum', 'lastRatingId'])
+        && request.resource.data.ratingCount == resource.data.get('ratingCount', 0) + 1
+        && request.resource.data.punctSum - resource.data.get('punctSum', 0)
+            == getAfter(/databases/$(database)/documents/users/$(uid)/ratings/$(request.resource.data.lastRatingId)).data.punctuality
+        && request.resource.data.levelSum - resource.data.get('levelSum', 0)
+            == getAfter(/databases/$(database)/documents/users/$(uid)/ratings/$(request.resource.data.lastRatingId)).data.level
+        && getAfter(/databases/$(database)/documents/users/$(uid)/ratings/$(request.resource.data.lastRatingId)).data.fromUid == request.auth.uid
+        && !exists(/databases/$(database)/documents/users/$(uid)/ratings/$(request.resource.data.lastRatingId));
+
+      // Historial de partidos del usuario (lo escribe quien lo confirma en el partido).
+      match /history/{matchId} {
+        allow read, delete: if signedIn() && request.auth.uid == uid;
+        allow create: if signedIn() && (request.auth.uid == uid || isOwner(matchId))
+          && existsAfter(/databases/$(database)/documents/matches/$(matchId)/participants/$(uid));
+        allow update: if false;
+      }
+
       // Datos privados (ej. WhatsApp guardado aunque no se muestre): solo el dueño.
       match /private/{doc} {
         allow read, write: if signedIn() && request.auth.uid == uid;
@@ -76,6 +95,19 @@ service cloud.firestore {
               && exists(/databases/$(database)/documents/users/$(uid)/friends/$(request.auth.uid))));
         allow read, delete: if signedIn() && request.auth.uid == uid;
       }
+    }
+
+    // Prueba gratis: un registro por celular, creado una sola vez con la hora del servidor; no se puede editar ni borrar.
+    match /devices/{deviceId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.trialStartedAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // Precios de las licencias (se cambian desde la consola de Firebase): config/license { monthly, quarterly }
+    match /config/{doc} {
+      allow read: if signedIn();
+      allow write: if false;
     }
 
     match /matches/{matchId} {

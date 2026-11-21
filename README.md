@@ -1,6 +1,22 @@
-# Fútbol Cerca 3.1.0
+# Fútbol Cerca 4.0.0
 
 Proyecto Android Kotlin + Jetpack Compose + Firebase Authentication/Firestore + OpenStreetMap (osmdroid).
+
+## Novedades 4.0.0
+- **Licencias mensuales y trimestrales por celular** (ver sección *Licencias*), con **7 días de prueba gratis** por celular. En el encabezado se ve el tiempo restante (días y horas). En *Perfil → Licencia* están los planes, el precio, el ID del celular, el botón para pedirla por WhatsApp y el campo para activarla.
+- **Pie con datos del creador**: CodeMarket y botón directo a WhatsApp 261 511-7220 (`https://wa.me/5492615117220`).
+- **Mapa**: un dedo desplaza la pantalla y dos dedos mueven/acercan el mapa.
+- **Confirmados visibles**: en cada partido y en cada invitación se ve quiénes ya están confirmados (con su valoración) antes de postularte o aceptar.
+- **Ranking de jugadores** (pestaña Amigos), **historial de partidos** (Perfil → Mis partidos) y **recordatorio** unas 3 h antes de cada partido en el que estás confirmado o que organizás.
+- Las valoraciones ahora se resumen en el perfil de cada jugador (promedio visible en el mapa, amigos y ranking).
+
+## Licencias
+- **Prueba gratis**: al abrir la app por primera vez en un celular se crea `devices/{ID}` en Firestore con la hora del servidor. No se puede editar ni borrar, así que reinstalar o crear otra cuenta en el mismo celular no reinicia los 7 días.
+- **Código de licencia**: lo genera CodeMarket con `herramientas/generador-licencias.html` (se abre en el navegador, sin internet). Hay que cargar la **clave privada** (`clave-privada-codemarket.pem`, **no está en este proyecto y no debe subirse a GitHub**), el **ID del celular** del cliente (lo ve en Perfil → Licencia), el plan y la fecha. El código solo funciona en ese celular, se puede activar hasta 15 días después de generarlo y no se puede reutilizar. La app solo lleva la clave pública, por lo que no se puede fabricar un código válido sin la privada.
+- **Renovación**: si la licencia sigue vigente, el código nuevo suma los días a continuación del vencimiento.
+- **Hora**: se corrige con la hora del servidor y nunca retrocede, para que cambiar el reloj del teléfono no regale días.
+- **Precios**: por defecto $5.000 mensual y $12.000 trimestral (valores de ejemplo). Se cambian sin recompilar creando en Firestore el documento `config/license` con los campos de texto `monthly` y `quarterly` (ej. `$7.500`).
+- **Límite conocido**: no hay servidor de cobro; la activación se guarda en el teléfono (copia de seguridad automática de Android incluida). Si el cliente borra los datos de la app o la desinstala sin copia, hay que enviarle el código otra vez.
 
 ## Novedades 3.1.0
 - **Valoraciones**: terminado el partido, los confirmados se valoran entre sí (puntualidad y nivel, 1 a 5 estrellas; una vez por persona y partido, no se puede editar). El promedio se ve en el mapa y en Amigos.
